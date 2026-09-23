@@ -43,23 +43,29 @@
   </label>
   <select id="genre"  class="filter"><option value="">All genres</option></select>
   <select id="decade" class="filter"><option value="">All decades</option></select>
-  <select id="played" class="filter">
-    <option value="">Watched or not</option>
-    <option value="dated">Has a play date</option>
-    <option value="played">Played, date unknown</option>
-    <option value="any">Played at all</option>
-    <option value="never">Never played</option>
-  </select>
-  <select id="sort" class="filter">
-    <option value="title">Sort by title</option>
-    <option value="year-desc">Newest first</option>
-    <option value="year-asc">Oldest first</option>
-    <option value="played-desc">Recently played</option>
-    <option value="added-desc">Recently added</option>
-    <option value="director">By director</option>
+  <div class="segmented" id="playedToggle" role="group" aria-label="Filter by played">
+    <button class="seg is-active" data-played="" type="button">All</button>
+    <button class="seg" data-played="any" type="button">Played</button>
+    <button class="seg" data-played="never" type="button">Unplayed</button>
+  </div>
+  <select id="playedDetail" class="filter" hidden
+          aria-label="Narrow played items by whether a date was recorded">
+    <option value="any">Any play date</option>
+    <option value="dated">With a play date</option>
+    <option value="undated">No date recorded</option>
   </select>
   <button id="reset" class="ghost" hidden>Clear</button>
   <span class="count" id="count"></span>
+</div>
+
+<div class="sortbar">
+  <span class="sortbar-label">Sort</span>
+  <div class="chips" id="sortChips"></div>
+  <select id="sortAdd" class="filter filter--slim">
+    <option value="">+ add level</option>
+  </select>
+  <button id="sortReset" class="ghost" hidden>Reset</button>
+  <span class="sortbar-hint">click a column to sort · shift-click to add a level</span>
 </div>
 
 <main>

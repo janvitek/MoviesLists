@@ -81,6 +81,24 @@ is recorded in `library_change`. Additions and edits are reported quietly.
 losing a film is the one change worth interrupting you for. Playlist position
 and playback scrub position are ignored as noise.
 
+### Filtering and sorting
+
+A three-way toggle switches between **All**, **Played** and **Unplayed**, each
+labelled with how many items it would show under whatever other filters are
+active. "Played" means a play count above zero *or* a recorded play date —
+either signal counts, since TV.app supplies them inconsistently. Choosing
+Played reveals one refinement, because the distinction matters here: whether
+a date was actually recorded.
+
+Sorting is a chain, not a single key. Click a column to sort by it, click
+again to flip direction, shift-click another to add it as the next level —
+so *play count, then year, then genre* is three clicks. The chain is shown as
+numbered chips that can be flipped or removed, and levels that are not columns
+(date added, for instance) can be added from the dropdown. Missing values sink
+to the bottom whichever way a level points, so "fewest plays first" never
+means "blanks first". Each view keeps its own default: films per director for
+directors, title everywhere else.
+
 ### Play dates are mostly missing
 
 TV.app keeps only the *most recent* play, and often not even that: of 5,957

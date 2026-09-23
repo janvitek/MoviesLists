@@ -29,6 +29,31 @@ const duration = (seconds) => {
 // Mirrors split_directors() in db.py: "Joel Coen & Ethan Coen" is two people.
 const splitDirectors = (v) => (v ? v.split(/\s*(?:,|&)\s*/).map((s) => s.trim()).filter(Boolean) : []);
 
+// Every field the list can be ordered by. `get` pulls the value actually
+// shown, so sorting agrees with what is on screen -- the play-date sort uses
+// the same added-date fallback the column displays.
+const SORT_FIELDS = {
+  name:         { label: 'Title',       type: 'text',   get: (r) => r.name },
+  director:     { label: 'Director',    type: 'text',   get: (r) => r.director },
+  show:         { label: 'Show',        type: 'text',   get: (r) => r.show },
+  year:         { label: 'Year',        type: 'number', get: (r) => r.year },
+  genre:        { label: 'Genre',       type: 'text',   get: (r) => r.genre },
+  played_count: { label: 'Plays',       type: 'number', get: (r) => r.played_count || 0 },
+  played_date:  { label: 'Last played', type: 'text',   get: (r) => r.played_date || r.date_added },
+  rating:       { label: 'Rating',      type: 'number', get: (r) => r.rating || 0 },
+  date_added:   { label: 'Date added',  type: 'text',   get: (r) => r.date_added },
+  episodes:     { label: 'Episodes',    type: 'number', get: (r) => r.episodes },
+  seasons:      { label: 'Seasons',     type: 'number', get: (r) => r.seasons },
+  watched:      { label: 'Watched',     type: 'number', get: (r) => r.watched },
+  films:        { label: 'Films',       type: 'number', get: (r) => r.count },
+};
+
+// Fields that read better largest-first when you first click them.
+const DESC_FIRST = new Set([
+  'played_count', 'played_date', 'rating', 'date_added',
+  'episodes', 'seasons', 'watched', 'films',
+]);
+
 const nullsLast = (get, cmp) => (a, b) => {
   const x = get(a), y = get(b);
   if (x == null && y == null) return 0;
@@ -39,12 +64,38 @@ const nullsLast = (get, cmp) => (a, b) => {
 const byText = (get) => nullsLast(get, (x, y) => String(x).localeCompare(String(y), undefined, { sensitivity: 'base' }));
 const byNumber = (get, dir = 1) => nullsLast(get, (x, y) => (x - y) * dir);
 
+// Chain of {field, dir}: earlier levels win, later ones break ties. Missing
+// values sink to the bottom whichever way the level is pointing, so "worst
+// first" never means "empty first".
+function chainComparator(chain) {
+  const levels = chain
+    .map(({ field, dir }) => {
+      const spec = SORT_FIELDS[field];
+      if (!spec) return null;
+      const sign = dir === 'desc' ? -1 : 1;
+      const compare = spec.type === 'number'
+        ? (x, y) => (x - y) * sign
+        : (x, y) => String(x).localeCompare(String(y), undefined, { sensitivity: 'base' }) * sign;
+      return nullsLast(spec.get, compare);
+    })
+    .filter(Boolean);
+  return (a, b) => {
+    for (const level of levels) {
+      const result = level(a, b);
+      if (result) return result;
+    }
+    return 0;
+  };
+}
+
 // ------------------------------------------------------------------- state
 
 const state = {
   items: [], byId: new Map(), shows: [], directors: [],
   stats: null, editableFields: [],
-  view: 'movies', search: '', genre: '', decade: '', played: '', sort: 'title',
+  view: 'movies', search: '', genre: '', decade: '',
+  played: '', playedDetail: 'any', playedCounts: { all: 0, any: 0, never: 0 },
+  sortChain: [],
   visible: [], selectedId: null, detail: null, dirty: new Map(),
 };
 
@@ -97,8 +148,12 @@ function starCell(item) {
 // every row, so the two can never drift apart.
 const VIEWS = {
   movies: {
-    grid: '64px minmax(140px,2.4fr) minmax(104px,1.5fr) 46px minmax(124px,1.1fr) 46px 112px 82px',
+    grid: '64px minmax(134px,2.4fr) minmax(100px,1.5fr) 60px minmax(124px,1.1fr) 60px 112px 82px',
     columns: ['', 'Title', 'Director', 'Year', 'Genre', 'Plays', 'Last played', 'Rating'],
+    // Aligned with `columns`; null means the column cannot be sorted on.
+    sortColumns: [null, 'name', 'director', 'year', 'genre', 'played_count', 'played_date', 'rating'],
+    sortFields: ['name', 'director', 'year', 'genre', 'played_count', 'played_date', 'rating', 'date_added'],
+    defaultSort: [{ field: 'name', dir: 'asc' }],
     source: () => state.items.filter((i) => i.media_kind === 'movie'),
     cells: (m) => [
       artCell(m.id, m.has_art),
@@ -113,8 +168,11 @@ const VIEWS = {
   },
 
   episodes: {
-    grid: '64px minmax(140px,2.4fr) minmax(112px,1.5fr) 46px minmax(124px,1.1fr) 46px 112px 82px',
+    grid: '64px minmax(134px,2.4fr) minmax(104px,1.5fr) 60px minmax(124px,1.1fr) 60px 112px 82px',
     columns: ['', 'Episode', 'Show', 'Year', 'Genre', 'Plays', 'Last played', 'Rating'],
+    sortColumns: [null, 'name', 'show', 'year', 'genre', 'played_count', 'played_date', 'rating'],
+    sortFields: ['name', 'show', 'year', 'genre', 'played_count', 'played_date', 'rating', 'date_added'],
+    defaultSort: [{ field: 'name', dir: 'asc' }],
     source: () => state.items.filter((i) => i.media_kind === 'TV show'),
     cells: (e) => [
       artCell(e.id, e.has_art),
@@ -131,6 +189,9 @@ const VIEWS = {
   shows: {
     grid: '72px minmax(190px,3fr) 88px 78px minmax(96px,1.2fr) 140px',
     columns: ['', 'Show', 'Episodes', 'Seasons', 'Genre', 'Last played'],
+    sortColumns: [null, 'name', 'episodes', 'seasons', 'genre', 'played_date'],
+    sortFields: ['name', 'episodes', 'seasons', 'watched', 'genre', 'played_date'],
+    defaultSort: [{ field: 'name', dir: 'asc' }],
     source: () => state.shows,
     cells: (s) => [
       artCell(s.artId, s.artId != null),
@@ -145,6 +206,9 @@ const VIEWS = {
   directors: {
     grid: 'minmax(190px,3fr) 72px 82px 140px',
     columns: ['Director', 'Films', 'Watched', 'Years'],
+    sortColumns: ['name', 'films', 'watched', 'year'],
+    sortFields: ['name', 'films', 'watched', 'year'],
+    defaultSort: [{ field: 'films', dir: 'desc' }, { field: 'name', dir: 'asc' }],
     source: () => state.directors,
     cells: (d) => [
       `<div class="cell title">${escapeHTML(d.name)}<div class="sub">${escapeHTML(d.films.map((f) => f.name).slice(0, 3).join(' · '))}${d.films.length > 3 ? ' …' : ''}</div></div>`,
@@ -219,6 +283,8 @@ function buildDirectors(items) {
 
 // ----------------------------------------------------------- filter and sort
 
+const isPlayed = (r) => (r.played_count || 0) > 0 || !!r.played_date;
+
 function applyFilters() {
   let rows = VIEWS[state.view].source();
 
@@ -235,40 +301,108 @@ function applyFilters() {
     const from = Number(state.decade);
     rows = rows.filter((r) => r.year != null && r.year >= from && r.year < from + 10);
   }
-  switch (state.played) {
-    case 'dated':  rows = rows.filter((r) => r.played_date); break;
-    case 'played': rows = rows.filter((r) => r.played_count > 0 && !r.played_date); break;
-    case 'any':    rows = rows.filter((r) => r.played_count > 0 || r.played_date); break;
-    case 'never':  rows = rows.filter((r) => !r.played_count && !r.played_date); break;
+
+  // Counted before the played filter is applied, so the toggle can show how
+  // many each choice would yield under the filters already active.
+  const played = rows.filter(isPlayed).length;
+  state.playedCounts = { all: rows.length, any: played, never: rows.length - played };
+
+  if (state.played === 'any') {
+    rows = rows.filter(isPlayed);
+    if (state.playedDetail === 'dated') rows = rows.filter((r) => r.played_date);
+    else if (state.playedDetail === 'undated') rows = rows.filter((r) => !r.played_date);
+  } else if (state.played === 'never') {
+    rows = rows.filter((r) => !isPlayed(r));
   }
 
-  const comparators = {
-    'title':       byText((r) => r.name),
-    'year-desc':   byNumber((r) => r.year, -1),
-    'year-asc':    byNumber((r) => r.year, 1),
-    'played-desc': nullsLast((r) => r.played_date, (x, y) => String(y).localeCompare(String(x))),
-    'added-desc':  nullsLast((r) => r.date_added, (x, y) => String(y).localeCompare(String(x))),
-    'director':    byText((r) => r.director),
-  };
-  // The directors view has no useful title order; rank by output instead.
-  if (state.view === 'directors' && state.sort === 'title') {
-    rows = [...rows].sort((a, b) => b.count - a.count
-      || a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
-  } else {
-    rows = [...rows].sort(comparators[state.sort] || comparators.title);
-  }
-  state.visible = rows;
+  state.visible = state.sortChain.length
+    ? [...rows].sort(chainComparator(state.sortChain))
+    : rows;
 }
 
 // ------------------------------------------------------------------ render
+
+const NUMERIC_HEADS = /^(Year|Films|Watched|Episodes|Seasons|Plays|Rating)$/;
 
 function renderHead() {
   const view = VIEWS[state.view];
   const head = $('listhead');
   head.style.gridTemplateColumns = view.grid;
-  head.innerHTML = view.columns
-    .map((c) => `<div class="cell${/^(Year|Films|Watched|Episodes|Seasons|Plays|Rating)$/.test(c) ? ' num' : ''}">${c}</div>`)
-    .join('');
+  const rank = new Map(state.sortChain.map((level, i) => [level.field, { i, dir: level.dir }]));
+
+  head.innerHTML = view.columns.map((label, i) => {
+    const field = (view.sortColumns || [])[i] || null;
+    const active = field ? rank.get(field) : null;
+    // The rank number only appears once more than one level is in play.
+    const marker = active
+      ? `<span class="sort-marker">${active.dir === 'desc' ? '\u25be' : '\u25b4'}`
+        + `${state.sortChain.length > 1 ? active.i + 1 : ''}</span>`
+      : '';
+    const classes = ['cell'];
+    if (NUMERIC_HEADS.test(label)) classes.push('num');
+    if (field) classes.push('sortable');
+    if (active) classes.push('is-sorted');
+    const attrs = field ? ` data-sort-field="${field}" role="button" tabindex="0"` : '';
+    return `<div class="${classes.join(' ')}"${attrs}>${label}${marker}</div>`;
+  }).join('');
+}
+
+const sameChain = (a, b) => a.length === b.length
+  && a.every((l, i) => l.field === b[i].field && l.dir === b[i].dir);
+
+function renderSortBar() {
+  const view = VIEWS[state.view];
+
+  $('sortChips').innerHTML = state.sortChain.map((level, i) => {
+    const spec = SORT_FIELDS[level.field];
+    if (!spec) return '';
+    return '<span class="chip">'
+      + `<span class="chip-rank">${i + 1}</span>`
+      + `<button class="chip-name" data-flip="${level.field}" title="flip direction">`
+      + `${escapeHTML(spec.label)} `
+      + `<span class="chip-dir">${level.dir === 'desc' ? '\u25be' : '\u25b4'}</span></button>`
+      + `<button class="chip-drop" data-drop="${level.field}" title="remove this level"`
+      + ` aria-label="remove ${escapeHTML(spec.label)}">\u00d7</button></span>`;
+  }).join('');
+
+  const used = new Set(state.sortChain.map((l) => l.field));
+  const available = view.sortFields.filter((f) => !used.has(f) && SORT_FIELDS[f]);
+  const add = $('sortAdd');
+  add.innerHTML = '<option value="">+ add level</option>'
+    + available.map((f) => `<option value="${f}">${escapeHTML(SORT_FIELDS[f].label)}</option>`).join('');
+  add.value = '';
+  add.hidden = available.length === 0;
+  $('sortReset').hidden = sameChain(state.sortChain, view.defaultSort);
+}
+
+function renderPlayedToggle() {
+  const counts = state.playedCounts;
+  for (const button of $('playedToggle').children) {
+    const key = button.dataset.played;
+    const n = key === 'any' ? counts.any : key === 'never' ? counts.never : counts.all;
+    button.classList.toggle('is-active', state.played === key);
+    button.innerHTML = `${escapeHTML(button.dataset.label)}`
+      + `<span class="seg-count">${n.toLocaleString()}</span>`;
+  }
+  // The date refinement only means anything for items that were played.
+  $('playedDetail').hidden = state.played !== 'any';
+}
+
+function setSort(field, additive) {
+  if (!SORT_FIELDS[field]) return;
+  const at = state.sortChain.findIndex((l) => l.field === field);
+  const firstDir = DESC_FIRST.has(field) ? 'desc' : 'asc';
+
+  if (additive) {
+    if (at >= 0) state.sortChain[at].dir = state.sortChain[at].dir === 'asc' ? 'desc' : 'asc';
+    else state.sortChain.push({ field, dir: firstDir });
+  } else if (at === 0 && state.sortChain.length === 1) {
+    // Clicking the only active column flips it rather than resetting it.
+    state.sortChain = [{ field, dir: state.sortChain[0].dir === 'asc' ? 'desc' : 'asc' }];
+  } else {
+    state.sortChain = [{ field, dir: firstDir }];
+  }
+  render();
 }
 
 function renderRows() {
@@ -300,6 +434,8 @@ function renderCount() {
 function render() {
   applyFilters();
   renderHead();
+  renderSortBar();
+  renderPlayedToggle();
   $('scroller').scrollTop = 0;
   renderRows();
   renderCount();
@@ -726,6 +862,9 @@ function wire() {
     if (!tab) return;
     for (const t of $('tabs').children) t.classList.toggle('is-active', t === tab);
     state.view = tab.dataset.view;
+    // Sort fields differ per view, so carrying a chain across would leave
+    // levels that mean nothing here.
+    state.sortChain = VIEWS[state.view].defaultSort.map((l) => ({ ...l }));
     // The rows still belong to the outgoing view here, so skip the redraw
     // and let render() rebuild them against the incoming one.
     closeDetail({ redraw: false });
@@ -733,12 +872,71 @@ function wire() {
   });
 
   $('search').addEventListener('input', debounce((e) => { state.search = e.target.value; render(); }, 120));
-  for (const [id, key] of [['genre', 'genre'], ['decade', 'decade'], ['played', 'played'], ['sort', 'sort']]) {
+  for (const [id, key] of [['genre', 'genre'], ['decade', 'decade']]) {
     $(id).addEventListener('change', (e) => { state[key] = e.target.value; render(); });
   }
+
+  // Remember each segment's label once; renderPlayedToggle rewrites the
+  // button contents to append a count.
+  for (const button of $('playedToggle').children) {
+    button.dataset.label = button.textContent.trim();
+  }
+  $('playedToggle').addEventListener('click', (e) => {
+    const button = e.target.closest('.seg');
+    if (!button) return;
+    state.played = button.dataset.played;
+    render();
+  });
+  $('playedDetail').addEventListener('change', (e) => {
+    state.playedDetail = e.target.value;
+    render();
+  });
+
   $('reset').addEventListener('click', () => {
     state.search = state.genre = state.decade = state.played = '';
-    $('search').value = ''; $('genre').value = $('decade').value = $('played').value = '';
+    state.playedDetail = 'any';
+    $('search').value = '';
+    $('genre').value = $('decade').value = '';
+    $('playedDetail').value = 'any';
+    render();
+  });
+
+  // Click a column to sort by it; shift-click to append another level.
+  $('listhead').addEventListener('click', (e) => {
+    const cell = e.target.closest('[data-sort-field]');
+    if (cell) setSort(cell.dataset.sortField, e.shiftKey);
+  });
+  $('listhead').addEventListener('keydown', (e) => {
+    const cell = e.target.closest('[data-sort-field]');
+    if (cell && (e.key === 'Enter' || e.key === ' ')) {
+      e.preventDefault();
+      setSort(cell.dataset.sortField, e.shiftKey);
+    }
+  });
+
+  $('sortChips').addEventListener('click', (e) => {
+    const flip = e.target.closest('[data-flip]');
+    if (flip) {
+      const level = state.sortChain.find((l) => l.field === flip.dataset.flip);
+      if (level) level.dir = level.dir === 'asc' ? 'desc' : 'asc';
+      return render();
+    }
+    const drop = e.target.closest('[data-drop]');
+    if (drop) {
+      state.sortChain = state.sortChain.filter((l) => l.field !== drop.dataset.drop);
+      render();
+    }
+  });
+
+  $('sortAdd').addEventListener('change', (e) => {
+    const field = e.target.value;
+    if (!field) return;
+    state.sortChain.push({ field, dir: DESC_FIRST.has(field) ? 'desc' : 'asc' });
+    render();
+  });
+
+  $('sortReset').addEventListener('click', () => {
+    state.sortChain = VIEWS[state.view].defaultSort.map((l) => ({ ...l }));
     render();
   });
 
@@ -829,6 +1027,8 @@ async function boot() {
     `TV.app records a play date for ${s.with_played_date.toLocaleString()} of the `
     + `${s.played.toLocaleString()} items marked played — it keeps only the most recent `
     + `play, and not always that. The rest show a play count instead.`;
+
+  state.sortChain = VIEWS[state.view].defaultSort.map((l) => ({ ...l }));
 
   renderChanges(data.changes);
   populateFilters(data.facets);
