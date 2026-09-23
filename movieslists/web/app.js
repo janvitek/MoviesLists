@@ -105,7 +105,7 @@ const state = {
   // One scope control: All, Library, Played, Unplayed. The last three are
   // all about films you actually own, so each of them excludes titles that
   // exist only on Letterboxd.
-  scope: '', playedDetail: 'any',
+  scope: '', playedDetail: 'any', facetView: null,
   scopeCounts: { all: 0, library: 0, played: 0, unplayed: 0 },
   sortChain: [],
   visible: [], selectedKey: null, detail: null, dirty: new Map(),
@@ -481,6 +481,12 @@ function renderCount() {
 }
 
 function render() {
+  if (state.facetView !== state.view) {
+    renderFacets();                       // counts belong to this view
+    state.facetView = state.view;
+    state.genre = $('genre').value;
+    state.decade = $('decade').value;
+  }
   applyFilters();
   renderHead();
   renderSortBar();
@@ -1232,11 +1238,44 @@ function wire() {
   window.addEventListener('resize', debounce(renderRows, 80));
 }
 
-function populateFilters(facets) {
-  for (const g of facets.genres) $('genre').add(new Option(`${g.value} (${g.count})`, g.value));
-  for (const d of facets.decades) $('decade').add(new Option(`${d.value}s (${d.count})`, String(d.value)));
+// Facets are counted from the rows the current view actually shows, not from
+// the whole library. Counting every item made "Comedy" read 3,076 in the
+// Movies list, which was mostly sitcom episodes.
+function renderFacets() {
+  const rows = VIEWS[state.view].source();
+  const hasGenre = state.view !== 'directors';
+
+  const genres = new Map();
+  const decades = new Map();
+  for (const row of rows) {
+    if (row.genre) genres.set(row.genre, (genres.get(row.genre) || 0) + 1);
+    if (row.year != null) {
+      const decade = Math.floor(row.year / 10) * 10;
+      decades.set(decade, (decades.get(decade) || 0) + 1);
+    }
+  }
+
+  fillSelect($('genre'), 'All genres', state.genre,
+    [...genres.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+      .map(([value, n]) => [value, `${value} (${n.toLocaleString()})`]));
+  fillSelect($('decade'), 'All decades', state.decade,
+    [...decades.entries()].sort((a, b) => b[0] - a[0])
+      .map(([value, n]) => [String(value), `${value}s (${n.toLocaleString()})`]));
+
+  $('genre').disabled = !hasGenre;
 }
 
+function fillSelect(select, allLabel, current, options) {
+  select.innerHTML = `<option value="">${escapeHTML(allLabel)}</option>`
+    + options.map(([value, label]) =>
+        `<option value="${escapeHTML(value)}">${escapeHTML(label)}</option>`).join('');
+  // A genre that exists in one view may not in another; drop it if so.
+  select.value = options.some(([value]) => value === current) ? current : '';
+  return select.value;
+}
+
+// Rows travel as parallel arrays to keep the payload small; turn them back
+// into objects.
 function unpack(columns, rows) {
   return rows.map((row) => {
     const item = {};
@@ -1277,7 +1316,6 @@ async function boot() {
   state.sortChain = VIEWS[state.view].defaultSort.map((l) => ({ ...l }));
 
   renderChanges(data.changes);
-  populateFilters(data.facets);
   wire();
   render();
   loadQuestions();
