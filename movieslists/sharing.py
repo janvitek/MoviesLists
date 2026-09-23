@@ -306,7 +306,7 @@ def reconcile(conn, store: "SharedStore") -> dict:
     """
     local: dict[tuple, dict] = {}
     for row in conn.execute(
-        "SELECT persistent_id, field, value, updated_at, source FROM item_override"
+        "SELECT work_key, field, value, updated_at, source FROM work_override"
     ):
         local[(row[0], row[1])] = {"value": row[2], "updated_at": row[3],
                                    "source": row[4], "deleted": False}
@@ -339,7 +339,7 @@ def reconcile(conn, store: "SharedStore") -> dict:
         if theirs > mine:
             if there.get("deleted"):
                 conn.execute(
-                    "DELETE FROM item_override WHERE persistent_id = ? AND field = ?",
+                    "DELETE FROM work_override WHERE work_key = ? AND field = ?",
                     (pid, field))
                 counts["deleted_locally"] += 1
             else:
@@ -359,9 +359,9 @@ def reconcile(conn, store: "SharedStore") -> dict:
 
 def _write_local(conn, pid: str, field: str, record: dict) -> None:
     conn.execute(
-        "INSERT INTO item_override (persistent_id, field, value, updated_at, source) "
+        "INSERT INTO work_override (work_key, field, value, updated_at, source) "
         "VALUES (?, ?, ?, ?, ?) "
-        "ON CONFLICT(persistent_id, field) DO UPDATE SET "
+        "ON CONFLICT(work_key, field) DO UPDATE SET "
         "value = excluded.value, updated_at = excluded.updated_at, "
         "source = excluded.source",
         (pid, field, record.get("value"), record.get("updated_at") or now(),

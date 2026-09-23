@@ -106,6 +106,43 @@ items marked played, 942 carry a date. Where no date exists the list shows the
 date the item was added instead, in italics, so a derived date is never
 mistaken for a real viewing.
 
+## One film, two sources
+
+TV.app and Letterboxd share no identifier — TV.app exposes no TMDb or IMDb
+id, and knows nothing of Letterboxd's URIs. So the app keeps its own notion of
+a film, a **work**, and links each source to it:
+
+```
+work  the-grand-budapest-hotel-2014
+ ├── tv  →  item.persistent_id   (genre, director, artwork, play count)
+ └── lb  →  lb_film.uri          (your rating, review, diary, watchlist)
+```
+
+The key is **derived** from the title and year rather than allocated, and that
+is the point: a film bought today computes the same key as the Letterboxd
+record written three years ago, so the two unify on the next import with
+nothing to confirm. `Watchmen (Director's Cut)` and Letterboxd's `Watchmen`
+both derive `watchmen-2009`.
+
+Derivation cannot cover everything — TV.app files `12 (2007)` under 2009 while
+Letterboxd says 2007 — so a key *decided* to mean an existing work is recorded
+as an alias, and that decision holds for every later import. Year drift is
+joined only in the unambiguous shape: one work known solely to TV.app, another
+solely to Letterboxd, same title, years within two. `Oldboy` 2003 and 2013
+stay two films, as do `Damsel` 2018 and 2024.
+
+Both tables keep their source's values verbatim, exactly as `item` does for
+TV.app. Nothing is copied between them; the list joins them on read and lays
+your own edits on top. The result is one list of every film either source
+knows about — including the ones you have watched but do not own.
+
+One subtlety worth recording, since it is not obvious from the export: the
+`Letterboxd URI` column means different things in different files.
+`ratings.csv`, `watched.csv`, `watchlist.csv` and `likes/films.csv` give the
+**film's** URI; `diary.csv` and `reviews.csv` give the URI of the **entry**,
+one per viewing. Films and entries are therefore separate tables, and entries
+are tied back by title and year like any other source.
+
 ## Two machines, one shared folder
 
 Edits are shared across machines; the cached library is not. That split is

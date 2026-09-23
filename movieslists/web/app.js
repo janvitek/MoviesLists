@@ -17,7 +17,10 @@ const escapeHTML = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => (
   { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
 ));
 
-const plural = (n, word) => `${Number(n).toLocaleString()} ${word}${n === 1 ? '' : 's'}`;
+// Irregulars this app actually uses; everything else takes a plain "s".
+const PLURALS = { entry: 'entries', copy: 'copies' };
+const plural = (n, word) => `${Number(n).toLocaleString()} `
+  + (n === 1 ? word : (PLURALS[word] || `${word}s`));
 
 const duration = (seconds) => {
   if (!seconds) return null;
@@ -91,24 +94,32 @@ function chainComparator(chain) {
 // ------------------------------------------------------------------- state
 
 const state = {
-  items: [], byId: new Map(), shows: [], directors: [],
+  items: [], episodes: [], byKey: new Map(), shows: [], directors: [],
   stats: null, editableFields: [],
   view: 'movies', search: '', genre: '', decade: '',
   played: '', playedDetail: 'any', playedCounts: { all: 0, any: 0, never: 0 },
+  source: '', sourceCounts: { all: 0, tv: 0, lb: 0 },
   sortChain: [],
-  visible: [], selectedId: null, detail: null, dirty: new Map(),
+  visible: [], selectedKey: null, detail: null, dirty: new Map(),
 };
 
 // ------------------------------------------------------------------- views
 
-const artCell = (id, hasArt, alt) => (hasArt
+const artCell = (id, hasArt) => (hasArt
   ? `<div class="cell"><img class="art" src="art/thumb/${id}.jpg" alt="" loading="lazy" decoding="async"></div>`
   : `<div class="cell"><div class="art art--empty" role="img" aria-label="no artwork"></div></div>`);
 
 const dash = () => '<div class="cell"><span class="dash">—</span></div>';
 const cellOrDash = (v) => (v ? `<div class="cell">${escapeHTML(v)}</div>` : dash());
-const editedTag = (row) => (row.edited ? '<span class="tag-edited">edited</span>' : '')
+// Which sources know about this film. A film only Letterboxd knows about is
+// one you have watched but do not own, which is worth seeing at a glance.
+const badges = (row) => (row.sources === 'lb'
+    ? '<span class="tag-lb" title="on Letterboxd; not in your TV.app library">letterboxd</span>'
+    : '')
+  + (row.watchlisted ? '<span class="tag-watch" title="on your watchlist">watchlist</span>' : '')
+  + (row.edited ? '<span class="tag-edited">edited</span>' : '')
   + (row.reviewed ? '<span class="tag-review" title="you wrote a review">review</span>' : '');
+const editedTag = badges;
 
 const episodeCode = (e) => {
   if (e.season_number && e.episode_number) return `S${e.season_number} · E${e.episode_number}`;
@@ -136,8 +147,10 @@ const playsCell = (i) => `<div class="cell num muted">${
 // click writes an override and leaves the imported value alone.
 function starCell(item) {
   const filled = Math.round((item.rating || 0) / 20);
-  let html = `<div class="cell stars" data-rate="${item.id}" title="${
-    filled ? `${filled} of 5` : 'not rated'}">`;
+  const title = filled
+    ? `${filled} of 5${item.lb_rating ? ` (Letterboxd: ${item.lb_rating})` : ''}`
+    : 'not rated';
+  let html = `<div class="cell stars" data-rate="${escapeHTML(item.key)}" title="${title}">`;
   for (let n = 1; n <= 5; n++) {
     html += `<span class="star${n <= filled ? ' is-on' : ''}" data-star="${n}">\u2605</span>`;
   }
@@ -154,9 +167,9 @@ const VIEWS = {
     sortColumns: [null, 'name', 'director', 'year', 'genre', 'played_count', 'played_date', 'rating'],
     sortFields: ['name', 'director', 'year', 'genre', 'played_count', 'played_date', 'rating', 'date_added'],
     defaultSort: [{ field: 'name', dir: 'asc' }],
-    source: () => state.items.filter((i) => i.media_kind === 'movie'),
+    source: () => state.items,
     cells: (m) => [
-      artCell(m.id, m.has_art),
+      artCell(m.tv_id, m.has_art),
       `<div class="cell title">${escapeHTML(m.name)}${editedTag(m)}</div>`,
       cellOrDash(m.director),
       `<div class="cell num muted">${m.year ?? '<span class="dash">—</span>'}</div>`,
@@ -173,9 +186,9 @@ const VIEWS = {
     sortColumns: [null, 'name', 'show', 'year', 'genre', 'played_count', 'played_date', 'rating'],
     sortFields: ['name', 'show', 'year', 'genre', 'played_count', 'played_date', 'rating', 'date_added'],
     defaultSort: [{ field: 'name', dir: 'asc' }],
-    source: () => state.items.filter((i) => i.media_kind === 'TV show'),
+    source: () => state.episodes,
     cells: (e) => [
-      artCell(e.id, e.has_art),
+      artCell(e.tv_id, e.has_art),
       `<div class="cell title">${escapeHTML(e.name)}${editedTag(e)}</div>`,
       `<div class="cell">${escapeHTML(e.show ?? '')}<div class="sub">${escapeHTML(episodeCode(e) || '')}</div></div>`,
       `<div class="cell num muted">${e.year ?? '<span class="dash">—</span>'}</div>`,
@@ -224,7 +237,7 @@ const VIEWS = {
 function buildShows(items) {
   const groups = new Map();
   for (const item of items) {
-    if (item.media_kind !== 'TV show' || !item.show) continue;
+    if (!item.show) continue;
     let g = groups.get(item.show);
     if (!g) {
       g = { id: `show:${item.show}`, name: item.show, episodes: 0, watched: 0,
@@ -242,7 +255,7 @@ function buildShows(items) {
     // Earliest episode that actually has art represents the series.
     if (item.has_art) {
       const rank = (item.season_number ?? 99) * 10000 + (item.episode_number ?? 0);
-      if (rank < g.artRank) { g.artRank = rank; g.artId = item.id; }
+      if (rank < g.artRank) { g.artRank = rank; g.artId = item.tv_id; }
     }
   }
   return [...groups.values()].map((g) => ({
@@ -257,7 +270,7 @@ function buildShows(items) {
 function buildDirectors(items) {
   const groups = new Map();
   for (const item of items) {
-    if (item.media_kind !== 'movie') continue;
+    if (!item.director) continue;
     for (const name of splitDirectors(item.director)) {
       const key = name.toLowerCase();
       let g = groups.get(key);
@@ -297,6 +310,11 @@ function applyFilters() {
     });
   }
   if (state.genre) rows = rows.filter((r) => r.genre === state.genre);
+
+  const owned = rows.filter((r) => r.sources !== 'lb').length;
+  state.sourceCounts = { all: rows.length, tv: owned, lb: rows.length - owned };
+  if (state.source === 'tv') rows = rows.filter((r) => r.sources !== 'lb');
+  else if (state.source === 'lb') rows = rows.filter((r) => r.sources === 'lb');
   if (state.decade) {
     const from = Number(state.decade);
     rows = rows.filter((r) => r.year != null && r.year >= from && r.year < from + 10);
@@ -375,6 +393,19 @@ function renderSortBar() {
   $('sortReset').hidden = sameChain(state.sortChain, view.defaultSort);
 }
 
+function renderSourceToggle() {
+  const counts = state.sourceCounts;
+  for (const button of $('sourceToggle').children) {
+    const key = button.dataset.source;
+    const n = key === 'tv' ? counts.tv : key === 'lb' ? counts.lb : counts.all;
+    button.classList.toggle('is-active', state.source === key);
+    button.innerHTML = `${escapeHTML(button.dataset.label)}`
+      + `<span class="seg-count">${n.toLocaleString()}</span>`;
+  }
+  // Only films have a Letterboxd side; episodes and aggregates do not.
+  $('sourceToggle').hidden = state.view !== 'movies';
+}
+
 function renderPlayedToggle() {
   const counts = state.playedCounts;
   for (const button of $('playedToggle').children) {
@@ -418,7 +449,7 @@ function renderRows() {
   const html = [];
   for (let i = start; i < end; i++) {
     const row = state.visible[i];
-    const selected = row.id === state.selectedId ? ' is-selected' : '';
+    const selected = row.key === state.selectedKey ? ' is-selected' : '';
     html.push(`<div class="row${selected}" data-index="${i}" style="grid-template-columns:${view.grid}">${view.cells(row).join('')}</div>`);
   }
   $('rows').style.transform = `translateY(${start * ROW_HEIGHT}px)`;
@@ -428,13 +459,15 @@ function renderRows() {
 function renderCount() {
   const noun = { movies: 'movie', episodes: 'episode', shows: 'show', directors: 'director' }[state.view];
   $('count').textContent = plural(state.visible.length, noun);
-  $('reset').hidden = !(state.search || state.genre || state.decade || state.played);
+  $('reset').hidden = !(state.search || state.genre || state.decade
+                        || state.played || state.source);
 }
 
 function render() {
   applyFilters();
   renderHead();
   renderSortBar();
+  renderSourceToggle();
   renderPlayedToggle();
   $('scroller').scrollTop = 0;
   renderRows();
@@ -625,7 +658,7 @@ function starPicker(rating) {
 }
 
 async function openDetail(row) {
-  state.selectedId = row.id;
+  state.selectedKey = row.key;
   state.dirty = new Map();
   $('detail').hidden = false;
   $('scrim').hidden = false;
@@ -638,7 +671,7 @@ async function openDetail(row) {
   }
   $('detailBody').innerHTML = '<div class="detail-inner"><p class="muted">loading…</p></div>';
   try {
-    const response = await fetch(`api/item/${row.id}`);
+    const response = await fetch(`api/work/${encodeURIComponent(row.key)}`);
     if (!response.ok) throw new Error(`server returned ${response.status}`);
     state.detail = await response.json();
     renderItemDetail();
@@ -704,9 +737,85 @@ function fieldControl(key, label, type, eff, imported, over) {
     + control + note + '</div>';
 }
 
+function sourceSummary(detail) {
+  const tv = detail.sources.tv || [];
+  const lb = detail.sources.letterboxd || [];
+  const entries = detail.entries || [];
+  const parts = [];
+
+  if (tv.length) {
+    const copies = tv.length > 1 ? ` (${tv.length} copies)` : '';
+    parts.push(`<div class="src src--tv"><span class="src-name">TV.app</span>`
+      + `<span class="src-detail">in your library${escapeHTML(copies)}</span></div>`);
+  }
+  if (lb.length || entries.length) {
+    const film = lb[0] || {};
+    const bits = [];
+    if (film.rating != null) bits.push(`rated ${film.rating}`);
+    if (entries.length) bits.push(`${plural(entries.length, 'log')}`);
+    if (film.watchlisted_date) bits.push('on your watchlist');
+    if (film.liked_date) bits.push('liked');
+    const href = film.uri
+      ? ` <a href="${escapeHTML(film.uri)}" target="_blank" rel="noopener noreferrer">open \u2197</a>` : '';
+    parts.push(`<div class="src src--lb"><span class="src-name">Letterboxd</span>`
+      + `<span class="src-detail">${escapeHTML(bits.join(' \u00b7 ')) || 'listed'}${href}</span></div>`);
+  }
+  if (!parts.length) return '';
+  return `<div class="sources">${parts.join('')}</div>`;
+}
+
+function viewingHistory(entries) {
+  if (!entries || !entries.length) return '';
+  const rows = entries.slice(0, 40).map((e) => {
+    const when = showDate(e.watched_date || e.logged_date) || '—';
+    const stars = e.rating ? ` <span class="muted">${e.rating}\u2605</span>` : '';
+    const again = e.rewatch ? ' <span class="muted">rewatch</span>' : '';
+    const tags = e.tags ? ` <span class="muted">${escapeHTML(e.tags)}</span>` : '';
+    return `<li>${when}${stars}${again}${tags}</li>`;
+  }).join('');
+  const more = entries.length > 40
+    ? `<li class="muted">… and ${entries.length - 40} more</li>` : '';
+  return `<div class="section-head"><h3>Viewing history</h3>`
+    + `<span class="save-note">${plural(entries.length, 'entry')} from Letterboxd</span></div>`
+    + `<ul class="history">${rows}${more}</ul>`;
+}
+
+function fieldControl(key, label, type, eff, imported, over) {
+  const overridden = Object.prototype.hasOwnProperty.call(over, key);
+  let value = state.dirty.has(key) ? state.dirty.get(key) : (eff[key] ?? '');
+  if (value === 0 && ZERO_IS_BLANK.has(key)) value = '';
+  const control = type === 'textarea'
+    ? `<textarea data-field="${key}" rows="${key === 'review' ? 8 : 4}"`
+      + ` placeholder="${key === 'review' ? 'Markdown: **bold**, *italic*, # heading, - list, > quote' : ''}"`
+      + `>${escapeHTML(value)}</textarea>`
+      + (key === 'review'
+          ? `<div class="md-preview" id="reviewPreview">${renderMarkdown(value)}</div>` : '')
+    : `<input data-field="${key}" type="${type === 'number' ? 'number' : 'text'}" value="${escapeHTML(value)}">`;
+  const source = imported[key];
+  const note = overridden
+    ? `<div class="field-note"><span class="imported">from source: ${
+         source == null || source === '' || (source === 0 && ZERO_IS_BLANK.has(key))
+           ? '—' : escapeHTML(source)
+       }</span><button data-revert="${key}">revert</button></div>`
+    : '';
+  return `<div class="field${overridden ? ' is-overridden' : ''}">`
+    + `<label>${escapeHTML(label)}${overridden ? '<span class="tag-edited">edited</span>' : ''}</label>`
+    + control + note + '</div>';
+}
+
 function renderItemDetail() {
   const d = state.detail;
-  const eff = d.effective, imported = d.imported, over = d.overrides;
+  const eff = d.effective, over = d.overrides;
+  const tv = (d.sources.tv || [])[0] || {};
+  const film = (d.sources.letterboxd || [])[0] || {};
+
+  // What each source says, before any edit -- the baseline a revert returns to.
+  const fromSource = {
+    ...tv,
+    year: tv.year || film.year,
+    rating: film.rating != null ? Math.round(film.rating * 20) : 0,
+    review: (d.entries || []).map((e) => e.review).find(Boolean) || null,
+  };
 
   const bits = [eff.media_kind === 'movie' ? 'Movie' : 'TV episode'];
   if (eff.year) bits.push(eff.year);
@@ -715,35 +824,39 @@ function renderItemDetail() {
 
   const groups = allEditFields();
   const primary = groups.priority
-    .map(([k, label, type]) => fieldControl(k, label, type, eff, imported, over)).join('');
+    .map(([k, label, type]) => fieldControl(k, label, type, eff, fromSource, over)).join('');
   const secondary = groups.rest
-    .map(([k, label, type]) => fieldControl(k, label, type, eff, imported, over)).join('');
+    .map(([k, label, type]) => fieldControl(k, label, type, eff, fromSource, over)).join('');
 
-  const raw = Object.entries(imported)
+  const raw = Object.entries(tv)
     .filter(([, v]) => v !== null && v !== '')
-    .map(([k, v]) => `<dt>${escapeHTML(k)}</dt><dd>${escapeHTML(v)}</dd>`)
-    .join('');
+    .map(([k, v]) => `<dt>${escapeHTML(k)}</dt><dd>${escapeHTML(v)}</dd>`).join('');
+  const rawLb = Object.entries(film)
+    .filter(([, v]) => v !== null && v !== '')
+    .map(([k, v]) => `<dt>${escapeHTML(k)}</dt><dd>${escapeHTML(v)}</dd>`).join('');
 
-  const playedNote = !eff.played_date && eff.date_added
-    ? `<p class="fallback-note">No play date recorded. The list shows the date added `
-      + `(${escapeHTML(showDate(eff.date_added) || '')}) in its place.</p>`
+  const lists = (d.lists || []).length
+    ? `<p class="lists">On your lists: ${d.lists.map((l) =>
+        escapeHTML(l.name)).join(', ')}</p>` : '';
+
+  const hero = d.art_id
+    ? `<img class="hero" src="art/full/${d.art_id}.jpg" alt="" onerror="this.remove()">`
     : '';
 
-  $('detailBody').innerHTML =
-    `<img class="hero" src="art/full/${d.id}.jpg" alt="" onerror="this.remove()">`
-    + `<div class="detail-inner">`
+  $('detailBody').innerHTML = hero + `<div class="detail-inner">`
     + `<h2>${escapeHTML(eff.name ?? '')}</h2>`
     + `<p class="lede">${escapeHTML(bits.join(' \u00b7 '))}</p>`
     + starPicker(eff.rating)
+    + sourceSummary(d)
     + lookupLinks(eff)
+    + lists
     + (eff.review
-        ? `<div class="review"><h3 class="review-head">Your review</h3>`
-          + `<div class="md">${renderMarkdown(eff.review)}</div></div>`
-        : '')
+        ? `<div class="review"><h3 class="review-head">Review</h3>`
+          + `<div class="md">${renderMarkdown(eff.review)}</div></div>` : '')
     + (eff.long_description ? `<p class="blurb">${escapeHTML(eff.long_description)}</p>` : '')
-    + playedNote
+    + viewingHistory(d.entries)
     + `<div class="section-head"><h3>Edit</h3>`
-    + `<span class="save-note" id="saveNote">edits are stored separately from the import</span></div>`
+    + `<span class="save-note" id="saveNote">edits are stored separately from every source</span></div>`
     + `<div class="edit">${primary}`
     + `<div class="edit-actions">`
     + `<button class="btn btn--primary" id="saveEdits" disabled>Save</button>`
@@ -751,8 +864,9 @@ function renderItemDetail() {
     + `</div></div>`
     + `<details class="raw"><summary>Every other field (${groups.rest.length}) — all editable</summary>`
     + `<div class="edit" style="margin-top:12px">${secondary}</div></details>`
-    + `<details class="raw"><summary>Imported values as stored (${Object.keys(imported).length})</summary>`
-    + `<dl>${raw}</dl></details></div>`;
+    + (raw ? `<details class="raw"><summary>TV.app, as stored</summary><dl>${raw}</dl></details>` : '')
+    + (rawLb ? `<details class="raw"><summary>Letterboxd, as stored</summary><dl>${rawLb}</dl></details>` : '')
+    + `</div>`;
 }
 
 function markDirty(field, value) {
@@ -775,14 +889,14 @@ async function rate(row, stars) {
   const current = Math.round((row.rating || 0) / 20);
   // Clicking the star you are already on clears the rating.
   const next = (stars === current || stars === 0) ? 0 : stars * 20;
-  const response = await fetch(`api/item/${row.id}/override`, {
+  const response = await fetch(`api/work/${encodeURIComponent(row.key)}/override`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ fields: { rating: next } }),
   });
   if (!response.ok) return;
   const payload = await response.json();
   patchRow(payload.item);
-  if (state.detail && state.detail.id === payload.item.id) {
+  if (state.detail && state.detail.key === payload.item.key) {
     state.detail = payload.item;
     renderItemDetail();
   }
@@ -793,7 +907,7 @@ async function saveEdits() {
   if (!state.detail || !state.dirty.size) return;
   const fields = {};
   for (const [k, v] of state.dirty) fields[k] = v === '' ? null : v;
-  const response = await fetch(`api/item/${state.detail.id}/override`, {
+  const response = await fetch(`api/work/${encodeURIComponent(state.detail.key)}/override`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ fields }),
   });
@@ -807,9 +921,8 @@ async function saveEdits() {
 }
 
 async function revertField(field) {
-  const url = field
-    ? `api/item/${state.detail.id}/override?field=${encodeURIComponent(field)}`
-    : `api/item/${state.detail.id}/override`;
+  const base = `api/work/${encodeURIComponent(state.detail.key)}/override`;
+  const url = field ? `${base}?field=${encodeURIComponent(field)}` : base;
   const response = await fetch(url, { method: 'DELETE' });
   const payload = await response.json();
   if (!response.ok) { alertNote(payload.error || 'could not revert'); return; }
@@ -828,7 +941,7 @@ function alertNote(message) {
 // Keep the in-memory list in step with an edit without refetching the
 // whole library.
 function patchRow(detail) {
-  const row = state.byId.get(detail.id);
+  const row = state.byKey.get(detail.key);
   if (!row) return;
   for (const key of ['name', 'genre', 'director', 'year', 'show', 'season_number',
                      'episode_number', 'media_kind', 'played_count', 'played_date',
@@ -837,13 +950,13 @@ function patchRow(detail) {
   }
   row.edited = Object.keys(detail.overrides).length > 0 ? 1 : 0;
   row.reviewed = detail.effective.review ? 1 : 0;
-  state.shows = buildShows(state.items);
+  state.shows = buildShows(state.episodes);
   state.directors = buildDirectors(state.items);
   applyFilters();
 }
 
 function closeDetail({ redraw = true } = {}) {
-  state.selectedId = null;
+  state.selectedKey = null;
   state.detail = null;
   state.dirty = new Map();
   $('detail').hidden = true;
@@ -880,9 +993,17 @@ function wire() {
 
   // Remember each segment's label once; renderPlayedToggle rewrites the
   // button contents to append a count.
-  for (const button of $('playedToggle').children) {
-    button.dataset.label = button.textContent.trim();
+  for (const group of ['playedToggle', 'sourceToggle']) {
+    for (const button of $(group).children) {
+      button.dataset.label = button.textContent.trim();
+    }
   }
+  $('sourceToggle').addEventListener('click', (e) => {
+    const button = e.target.closest('.seg');
+    if (!button) return;
+    state.source = button.dataset.source;
+    render();
+  });
   $('playedToggle').addEventListener('click', (e) => {
     const button = e.target.closest('.seg');
     if (!button) return;
@@ -895,7 +1016,7 @@ function wire() {
   });
 
   $('reset').addEventListener('click', () => {
-    state.search = state.genre = state.decade = state.played = '';
+    state.search = state.genre = state.decade = state.played = state.source = '';
     state.playedDetail = 'any';
     $('search').value = '';
     $('genre').value = $('decade').value = '';
@@ -955,7 +1076,7 @@ function wire() {
       // Rating from the list should not also open the panel.
       e.stopPropagation();
       const holder = star.closest('[data-rate]');
-      const row = state.byId.get(Number(holder.dataset.rate));
+      const row = state.byKey.get(holder.dataset.rate);
       return void rate(row, Number(star.dataset.star));
     }
     const row = e.target.closest('.row');
@@ -977,7 +1098,7 @@ function wire() {
     if (e.target.id === 'revertAll') return void revertField(null);
     const star = e.target.closest('.star, .clear-stars');
     if (star && state.detail) {
-      return void rate(state.byId.get(state.detail.id), Number(star.dataset.star));
+      return void rate(state.byKey.get(state.detail.key), Number(star.dataset.star));
     }
     const revert = e.target.dataset?.revert;
     if (revert) revertField(revert);
@@ -1004,31 +1125,42 @@ function populateFilters(facets) {
   for (const d of facets.decades) $('decade').add(new Option(`${d.value}s (${d.count})`, String(d.value)));
 }
 
+function unpack(columns, rows) {
+  return rows.map((row) => {
+    const item = {};
+    for (let i = 0; i < columns.length; i++) item[columns[i]] = row[i];
+    return item;
+  });
+}
+
 async function boot() {
   const response = await fetch('api/library');
   if (!response.ok) throw new Error(`the server returned ${response.status}`);
   const data = await response.json();
 
-  const { columns, rows } = data;
-  state.items = rows.map((row) => {
-    const item = {};
-    for (let i = 0; i < columns.length; i++) item[columns[i]] = row[i];
-    return item;
-  });
-  state.byId = new Map(state.items.map((i) => [i.id, i]));
-  state.shows = buildShows(state.items);
+  // Films are works, drawn from TV.app and Letterboxd together. Episodes
+  // have no Letterboxd counterpart and stay as plain TV.app rows.
+  state.items = unpack(data.columns, data.rows);
+  state.episodes = unpack(data.columns, data.episodes || []);
+  state.byKey = new Map(state.items.map((i) => [i.key, i]));
+  state.shows = buildShows(state.episodes);
   state.directors = buildDirectors(state.items);
   state.stats = data.stats;
   state.editableFields = data.editable_fields || [];
   state.fieldTypes = data.field_types || {};
 
   const s = data.stats;
-  $('subtitle').textContent = `${plural(s.movies, 'movie')} · ${plural(s.shows, 'show')} · `
-    + `${plural(s.episodes, 'episode')} · ${plural(state.directors.length, 'director')}`;
+  $('subtitle').textContent =
+    `${plural(s.works, 'film')} \u00b7 ${s.both.toLocaleString()} in both \u00b7 `
+    + `${s.tv_only.toLocaleString()} only in TV.app \u00b7 `
+    + `${s.lb_only.toLocaleString()} only on Letterboxd \u00b7 `
+    + `${plural(s.episodes, 'episode')}`;
   $('footnote').textContent =
     `TV.app records a play date for ${s.with_played_date.toLocaleString()} of the `
-    + `${s.played.toLocaleString()} items marked played — it keeps only the most recent `
-    + `play, and not always that. The rest show a play count instead.`;
+    + `${s.played.toLocaleString()} items it marks played, so the list falls back to `
+    + `the date added, in italics. Ratings and reviews come from Letterboxd `
+    + `(${s.lb_rated.toLocaleString()} rated, ${s.lb_reviews.toLocaleString()} reviewed) `
+    + `unless you have edited them here.`;
 
   state.sortChain = VIEWS[state.view].defaultSort.map((l) => ({ ...l }));
 

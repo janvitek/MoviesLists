@@ -14,7 +14,7 @@ import sqlite3
 from pathlib import Path
 
 # Bumped whenever the column set changes; a mismatch rebuilds the cache.
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 6
 
 # (JSON key from extract.js, SQL column, SQL type). Order defines the table.
 COLUMNS: list[tuple[str, str, str]] = [
@@ -155,6 +155,138 @@ CREATE TABLE IF NOT EXISTS library_change (
 CREATE INDEX IF NOT EXISTS idx_change_sync ON library_change(sync_id);
 CREATE INDEX IF NOT EXISTS idx_change_ack  ON library_change(acknowledged, severity);
 
+-- ---------------------------------------------------------------- works
+--
+-- A "work" is one film, independent of where we learned about it. TV.app and
+-- Letterboxd each describe films in their own terms and share no identifier,
+-- so this is our own.
+--
+-- The key is derived from the title and year rather than allocated, which is
+-- what makes a purchase unify by itself: a film bought today computes the
+-- same key as the Letterboxd record written years ago, and the two land on
+-- the same work with nothing to confirm.
+CREATE TABLE IF NOT EXISTS work (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    key        TEXT NOT NULL UNIQUE,   -- "the-grand-budapest-hotel-2014"
+    title      TEXT NOT NULL,
+    year       INTEGER,
+    created_at TEXT NOT NULL
+);
+
+-- Derivation alone cannot cover everything: TV.app files "12 (2007)" under
+-- 2009 while Letterboxd says 2007, and the same film is released under
+-- different titles. An alias records a key that has been decided to mean an
+-- existing work, so the decision is made once and holds for every later
+-- import.
+CREATE TABLE IF NOT EXISTS work_alias (
+    key        TEXT PRIMARY KEY,
+    work_id    INTEGER NOT NULL REFERENCES work(id) ON DELETE CASCADE,
+    reason     TEXT,                   -- derived | year-drift | alt-title | manual
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS work_source (
+    source     TEXT NOT NULL,          -- tv | lb
+    source_id  TEXT NOT NULL,          -- item.persistent_id | lb_film.uri
+    work_id    INTEGER NOT NULL REFERENCES work(id) ON DELETE CASCADE,
+    method     TEXT,
+    linked_at  TEXT NOT NULL,
+    PRIMARY KEY (source, source_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_work_source_work ON work_source(work_id);
+CREATE INDEX IF NOT EXISTS idx_work_alias_work  ON work_alias(work_id);
+
+-- Edits hang off the work, not off a TV.app track, so a film you only have
+-- on Letterboxd can still be rated and reviewed here.
+CREATE TABLE IF NOT EXISTS work_override (
+    work_key   TEXT NOT NULL,
+    field      TEXT NOT NULL,
+    value      TEXT,
+    updated_at TEXT NOT NULL,
+    source     TEXT NOT NULL DEFAULT 'manual',
+    PRIMARY KEY (work_key, field)
+);
+
+-- ----------------------------------------------------------- letterboxd
+--
+-- The export, kept whole. Every column of every film-level CSV, verbatim,
+-- exactly as `item` keeps TV.app's own values.
+-- One row per film, keyed by its Letterboxd film URI.
+--
+-- Only some of the export's files identify a film: ratings, watched,
+-- watchlist and likes carry the film's own URI. diary.csv and reviews.csv
+-- carry the URI of the *entry*, not the film, which is why those live in
+-- lb_entry and are tied back by title and year like any other source.
+CREATE TABLE IF NOT EXISTS lb_film (
+    uri              TEXT PRIMARY KEY,
+    name             TEXT NOT NULL,
+    year             INTEGER,
+    rating           REAL,        -- 0.5-5, as Letterboxd records it
+    rating_date      TEXT,
+    watched_date     TEXT,        -- when it was logged as watched
+    watchlisted_date TEXT,
+    liked_date       TEXT,
+    is_deleted       INTEGER NOT NULL DEFAULT 0,
+    work_key         TEXT,        -- filled by works.rebuild
+    imported_at      TEXT NOT NULL
+);
+
+-- One row per diary entry or review: a film watched three times has three.
+CREATE TABLE IF NOT EXISTS lb_entry (
+    uri          TEXT PRIMARY KEY,   -- the entry's URI, not the film's
+    name         TEXT NOT NULL,
+    year         INTEGER,
+    logged_date  TEXT,
+    watched_date TEXT,
+    rating       REAL,
+    rewatch      INTEGER NOT NULL DEFAULT 0,
+    tags         TEXT,
+    review       TEXT,               -- converted to Markdown
+    review_html  TEXT,               -- and kept as it arrived
+    is_orphaned  INTEGER NOT NULL DEFAULT 0,
+    is_deleted   INTEGER NOT NULL DEFAULT 0,
+    work_key     TEXT,
+    imported_at  TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_lb_film_work  ON lb_film(work_key);
+CREATE INDEX IF NOT EXISTS idx_lb_entry_work ON lb_entry(work_key);
+CREATE INDEX IF NOT EXISTS idx_lb_entry_date ON lb_entry(watched_date);
+
+CREATE TABLE IF NOT EXISTS lb_list (
+    slug        TEXT PRIMARY KEY,
+    name        TEXT,
+    url         TEXT,
+    description TEXT,
+    created     TEXT,
+    tags        TEXT
+);
+
+CREATE TABLE IF NOT EXISTS lb_list_film (
+    list_slug   TEXT NOT NULL,
+    position    INTEGER,
+    name        TEXT NOT NULL,
+    year        INTEGER,
+    uri         TEXT,
+    description TEXT,
+    PRIMARY KEY (list_slug, position)
+);
+
+CREATE TABLE IF NOT EXISTS lb_profile (
+    username     TEXT PRIMARY KEY,
+    date_joined  TEXT,
+    given_name   TEXT,
+    family_name  TEXT,
+    location     TEXT,
+    website      TEXT,
+    bio          TEXT,
+    pronoun      TEXT,
+    favorite_films TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_lb_film_year ON lb_film(year);
+
 CREATE TABLE IF NOT EXISTS sync_run (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     synced_at   TEXT NOT NULL,
@@ -239,10 +371,17 @@ def connect(path: Path) -> sqlite3.Connection:
     if existing and version != SCHEMA_VERSION:
         # The column set changed; the cache is disposable, so rebuild it.
         conn.executescript(
-            # item_override and letterboxd_entry are NOT dropped: those hold
-            # the user's own work, not cached library data.
+            # Caches are rebuilt; the user's own work is not. `item` comes
+            # back from TV.app and the lb_* tables from the export file, but
+            # work_override, work, work_alias and work_source stay put.
             "DROP TABLE IF EXISTS item_director;"
             "DROP TABLE IF EXISTS item;"
+            "DROP TABLE IF EXISTS lb_diary;"
+            "DROP TABLE IF EXISTS lb_film;"
+            "DROP TABLE IF EXISTS lb_entry;"
+            "DROP TABLE IF EXISTS lb_list;"
+            "DROP TABLE IF EXISTS lb_list_film;"
+            "DROP TABLE IF EXISTS lb_profile;"
         )
     conn.executescript(SCHEMA)
     _add_missing_columns(conn)
@@ -418,19 +557,19 @@ def coerce(field: str, text: str | None):
 
 
 def overrides(conn: sqlite3.Connection) -> dict[str, dict[str, object]]:
-    """All overrides, as {persistent_id: {field: value}}."""
+    """All overrides, as {work_key: {field: value}}."""
     out: dict[str, dict[str, object]] = {}
-    for row in conn.execute("SELECT persistent_id, field, value FROM item_override"):
+    for row in conn.execute("SELECT work_key, field, value FROM work_override"):
         out.setdefault(row[0], {})[row[1]] = coerce(row[1], row[2])
     return out
 
 
-def overrides_for(conn: sqlite3.Connection, persistent_id: str) -> dict:
+def overrides_for(conn: sqlite3.Connection, work_key: str) -> dict:
     return {
         row[0]: coerce(row[0], row[1])
         for row in conn.execute(
-            "SELECT field, value FROM item_override WHERE persistent_id = ?",
-            (persistent_id,),
+            "SELECT field, value FROM work_override WHERE work_key = ?",
+            (work_key,),
         )
     }
 
@@ -446,24 +585,24 @@ def attach_store(store) -> None:
     _STORE = store
 
 
-def set_override(conn: sqlite3.Connection, persistent_id: str, field: str,
+def set_override(conn: sqlite3.Connection, work_key: str, field: str,
                  value, source: str = "manual") -> None:
-    """Shadow one field. The imported value is left untouched."""
+    """Shadow one field of a work. Every source's own values stay untouched."""
     if field not in EDITABLE_FIELDS:
         raise ValueError(f"{field!r} is not an editable field")
     stamp = _now_iso()
     with conn:
         conn.execute(
-            "INSERT INTO item_override (persistent_id, field, value, updated_at, "
+            "INSERT INTO work_override (work_key, field, value, updated_at, "
             "source) VALUES (?, ?, ?, ?, ?) "
-            "ON CONFLICT(persistent_id, field) DO UPDATE SET "
+            "ON CONFLICT(work_key, field) DO UPDATE SET "
             "value = excluded.value, updated_at = excluded.updated_at, "
             "source = excluded.source",
-            (persistent_id, field, None if value is None else str(value),
+            (work_key, field, None if value is None else str(value),
              stamp, source),
         )
     if _STORE is not None:
-        _STORE.stamp(persistent_id, field, value, source)
+        _STORE.stamp(work_key, field, value, source)
 
 
 def _now_iso() -> str:
@@ -475,32 +614,32 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
 
 
-def override_sources(conn: sqlite3.Connection, persistent_id: str) -> dict[str, str]:
+def override_sources(conn: sqlite3.Connection, work_key: str) -> dict[str, str]:
     return {
         row[0]: row[1] for row in conn.execute(
-            "SELECT field, source FROM item_override WHERE persistent_id = ?",
-            (persistent_id,),
+            "SELECT field, source FROM work_override WHERE work_key = ?",
+            (work_key,),
         )
     }
 
 
-def clear_override(conn: sqlite3.Connection, persistent_id: str,
+def clear_override(conn: sqlite3.Connection, work_key: str,
                    field: str | None = None) -> int:
-    """Drop an override so the imported value shows through again."""
+    """Drop an override so the sources' own value shows through again."""
     with conn:
         if field is None:
             cur = conn.execute(
-                "DELETE FROM item_override WHERE persistent_id = ?", (persistent_id,)
+                "DELETE FROM work_override WHERE work_key = ?", (work_key,)
             )
         else:
             cur = conn.execute(
-                "DELETE FROM item_override WHERE persistent_id = ? AND field = ?",
-                (persistent_id, field),
+                "DELETE FROM work_override WHERE work_key = ? AND field = ?",
+                (work_key, field),
             )
     # A removal is recorded in the shared store rather than simply vanishing,
     # or the next merge would restore it from the other machine.
     if _STORE is not None:
-        _STORE.forget(persistent_id, field)
+        _STORE.forget(work_key, field)
     return cur.rowcount
 
 

@@ -43,6 +43,11 @@
   </label>
   <select id="genre"  class="filter"><option value="">All genres</option></select>
   <select id="decade" class="filter"><option value="">All decades</option></select>
+  <div class="segmented" id="sourceToggle" role="group" aria-label="Filter by source">
+    <button class="seg is-active" data-source="" type="button">All</button>
+    <button class="seg" data-source="tv" type="button">In library</button>
+    <button class="seg" data-source="lb" type="button">Letterboxd only</button>
+  </div>
   <div class="segmented" id="playedToggle" role="group" aria-label="Filter by played">
     <button class="seg is-active" data-played="" type="button">All</button>
     <button class="seg" data-played="any" type="button">Played</button>

@@ -552,3 +552,206 @@ def status(conn: sqlite3.Connection) -> dict:
             "SELECT COUNT(*) FROM item_override WHERE source = 'letterboxd'"
         ).fetchone()[0],
     }
+
+
+# ------------------------------------------------------- full-fidelity import
+
+def read_files(path: Path) -> dict[str, str]:
+    """Every CSV in an export, keyed by path relative to its root."""
+    path = Path(path).expanduser()
+    out: dict[str, str] = {}
+    if path.is_dir():
+        for csv_path in sorted(path.rglob("*.csv")):
+            out[csv_path.relative_to(path).as_posix()] = csv_path.read_text(
+                encoding="utf-8-sig", errors="replace")
+    elif zipfile.is_zipfile(path):
+        with zipfile.ZipFile(path) as archive:
+            names = archive.namelist()
+            # A zip usually wraps everything in one top folder; drop it.
+            roots = {n.split("/", 1)[0] for n in names if "/" in n}
+            prefix = f"{roots.pop()}/" if len(roots) == 1 else ""
+            for member in names:
+                if member.lower().endswith(".csv"):
+                    key = member[len(prefix):] if member.startswith(prefix) else member
+                    out[key] = archive.read(member).decode("utf-8-sig", "replace")
+    else:
+        raise ValueError(f"{path} is not a Letterboxd export (.zip or folder)")
+    if not out:
+        raise ValueError(f"no CSVs found in {path}")
+    return out
+
+
+def _rows(text: str) -> list[dict]:
+    """Rows with their headers folded to the names used here."""
+    rows = []
+    for raw in csv.DictReader(io.StringIO(text)):
+        row = {}
+        for key, value in raw.items():
+            mapped = _FIELD_MAP.get(_normalize_header(key))
+            if mapped and value not in (None, ""):
+                row[mapped] = value.strip()
+        if row.get("title"):
+            rows.append(row)
+    return rows
+
+
+def parse_list(text: str) -> tuple[dict, list[dict]]:
+    """A list export: a metadata block, a blank line, then the films."""
+    blocks = re.split(r"\r?\n\r?\n", text.strip(), maxsplit=1)
+    meta: dict = {}
+    if blocks:
+        head = list(csv.DictReader(io.StringIO(
+            blocks[0].split("\n", 1)[1] if blocks[0].lower().startswith("letterboxd list")
+            else blocks[0])))
+        if head:
+            meta = {k.lower().replace(" ", "_"): v for k, v in head[0].items() if k}
+    films = []
+    if len(blocks) > 1:
+        for row in csv.DictReader(io.StringIO(blocks[1])):
+            keys = {k.lower().strip(): (v or "").strip() for k, v in row.items() if k}
+            if keys.get("name"):
+                films.append({
+                    "position": _int(keys.get("position")),
+                    "name": keys["name"],
+                    "year": _int(keys.get("year")),
+                    "uri": keys.get("url") or None,
+                    "description": keys.get("description") or None,
+                })
+    return meta, films
+
+
+# Which files name a film by its own URI, and which name an entry.
+FILM_FILES = {
+    "ratings.csv": "rating", "watched.csv": "watched",
+    "watchlist.csv": "watchlist", "likes/films.csv": "like",
+}
+ENTRY_FILES = {"diary.csv", "reviews.csv"}
+
+
+def import_full(conn: sqlite3.Connection, path: Path) -> dict:
+    """Load an entire Letterboxd export into its own tables, verbatim.
+
+    Mirrors what the TV.app importer does: keep what the source said and
+    leave interpretation to the read side.
+    """
+    files = read_files(path)
+    stamp = db._now_iso()
+    films: dict[str, dict] = {}
+    entries: dict[str, dict] = {}
+
+    for name, text in sorted(files.items()):
+        base = name.split("/")[-1]
+        folder = name.rsplit("/", 1)[0] if "/" in name else ""
+        deleted = 1 if folder == "deleted" else 0
+        orphaned = 1 if folder == "orphaned" else 0
+
+        kind = FILM_FILES.get(name)
+        if kind is None and folder in ("deleted", "orphaned"):
+            kind = FILM_FILES.get(base)
+        is_entry = base in ENTRY_FILES
+
+        if kind is None and not is_entry:
+            continue
+
+        for row in _rows(text):
+            uri = row.get("letterboxd_uri")
+            if not uri:
+                continue
+            year = _int(row.get("year"))
+            rating = _rating(row)
+
+            if is_entry:
+                entry = entries.setdefault(uri, {
+                    "uri": uri, "name": row["title"], "year": year,
+                    "logged_date": None, "watched_date": None, "rating": None,
+                    "rewatch": 0, "tags": None, "review": None,
+                    "review_html": None, "is_orphaned": orphaned,
+                    "is_deleted": deleted, "work_key": None,
+                    "imported_at": stamp,
+                })
+                entry["logged_date"] = row.get("date") or entry["logged_date"]
+                entry["watched_date"] = (row.get("watched_date")
+                                         or entry["watched_date"]
+                                         or row.get("date"))
+                if rating is not None:
+                    entry["rating"] = rating
+                if str(row.get("rewatch", "")).lower() in ("yes", "true", "1"):
+                    entry["rewatch"] = 1
+                if row.get("tags"):
+                    entry["tags"] = row["tags"]
+                if row.get("review"):
+                    entry["review_html"] = row["review"]
+                    entry["review"] = html_to_markdown(row["review"])
+                continue
+
+            film = films.setdefault(uri, {
+                "uri": uri, "name": row["title"], "year": year, "rating": None,
+                "rating_date": None, "watched_date": None,
+                "watchlisted_date": None, "liked_date": None,
+                "is_deleted": deleted, "work_key": None, "imported_at": stamp,
+            })
+            if year and not film["year"]:
+                film["year"] = year
+            if kind == "rating":
+                film["rating"] = rating
+                film["rating_date"] = row.get("date")
+            elif kind == "watched":
+                film["watched_date"] = row.get("date")
+            elif kind == "watchlist":
+                film["watchlisted_date"] = row.get("date")
+            elif kind == "like":
+                film["liked_date"] = row.get("date")
+
+    with conn:
+        conn.execute("DELETE FROM lb_film")
+        conn.execute("DELETE FROM lb_entry")
+        for table, records in (("lb_film", films), ("lb_entry", entries)):
+            if not records:
+                continue
+            columns = list(next(iter(records.values())).keys())
+            conn.executemany(
+                f"INSERT INTO {table} ({', '.join(columns)}) "
+                f"VALUES ({', '.join(':' + c for c in columns)})",
+                list(records.values()),
+            )
+
+        conn.execute("DELETE FROM lb_list")
+        conn.execute("DELETE FROM lb_list_film")
+        lists = 0
+        for name, text in sorted(files.items()):
+            if not name.startswith("lists/"):
+                continue
+            slug = name[len("lists/"):-len(".csv")]
+            meta, items = parse_list(text)
+            conn.execute(
+                "INSERT OR REPLACE INTO lb_list (slug, name, url, description, "
+                "created, tags) VALUES (?, ?, ?, ?, ?, ?)",
+                (slug, meta.get("name") or slug, meta.get("url"),
+                 meta.get("description"), meta.get("date"), meta.get("tags")),
+            )
+            conn.executemany(
+                "INSERT OR REPLACE INTO lb_list_film (list_slug, position, name, "
+                "year, uri, description) VALUES (?, ?, ?, ?, ?, ?)",
+                [(slug, e["position"], e["name"], e["year"], e["uri"],
+                  e["description"]) for e in items],
+            )
+            lists += 1
+
+        if "profile.csv" in files:
+            for row in csv.DictReader(io.StringIO(files["profile.csv"])):
+                keys = {k.lower().replace(" ", "_"): v for k, v in row.items() if k}
+                if keys.get("username"):
+                    conn.execute(
+                        "INSERT OR REPLACE INTO lb_profile (username, date_joined, "
+                        "given_name, family_name, location, website, bio, pronoun, "
+                        "favorite_films) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (keys.get("username"), keys.get("date_joined"),
+                         keys.get("given_name"), keys.get("family_name"),
+                         keys.get("location"), keys.get("website"),
+                         keys.get("bio"), keys.get("pronoun"),
+                         keys.get("favorite_films")),
+                    )
+                break
+
+    return {"films": len(films), "entries": len(entries), "lists": lists,
+            "files": len(files)}

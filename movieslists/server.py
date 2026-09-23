@@ -30,8 +30,8 @@ def attach_sharing(store, shared_dir=None) -> None:
     _SHARED_STORE = store
 GZIP_MIN_BYTES = 1024
 ART_ROUTE = re.compile(r"^/art/(thumb|full)/(\d+)\.jpg$")
-ITEM_ROUTE = re.compile(r"^/api/item/(\d+)$")
-OVERRIDE_ROUTE = re.compile(r"^/api/item/(\d+)/override$")
+WORK_ROUTE = re.compile(r"^/api/work/([^/]+)$")
+OVERRIDE_ROUTE = re.compile(r"^/api/work/([^/]+)/override$")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -91,15 +91,16 @@ class Handler(BaseHTTPRequestHandler):
         if art:
             return self.send_artwork(art.group(1), int(art.group(2)))
 
-        item = ITEM_ROUTE.match(path)
-        if item:
+        work = WORK_ROUTE.match(path)
+        if work:
+            from urllib.parse import unquote
             conn = self._read()
             try:
-                detail = queries.item_detail(conn, int(item.group(1)))
+                detail = queries.work_detail(conn, unquote(work.group(1)))
             finally:
                 conn.close()
             if detail is None:
-                return self.send_json({"error": "no such item"}, status=404)
+                return self.send_json({"error": "no such film"}, status=404)
             return self.send_json(detail)
 
         if path.startswith("/api/"):
@@ -135,7 +136,8 @@ class Handler(BaseHTTPRequestHandler):
 
         override = OVERRIDE_ROUTE.match(path)
         if override:
-            return self.set_overrides(int(override.group(1)))
+            from urllib.parse import unquote
+            return self.set_overrides(unquote(override.group(1)))
 
         if path == "/api/changes/ack":
             body = self._body()
@@ -169,24 +171,21 @@ class Handler(BaseHTTPRequestHandler):
         if not override:
             return self.send_json({"error": "no such endpoint"}, status=404)
 
+        from urllib.parse import unquote
+        key = unquote(override.group(1))
         field = parse_qs(parsed.query).get("field", [None])[0]
         conn = self._write()
         try:
-            row = conn.execute(
-                "SELECT persistent_id FROM item WHERE id = ?", (int(override.group(1)),)
-            ).fetchone()
-            if row is None or not row["persistent_id"]:
-                return self.send_json({"error": "no such item"}, status=404)
-            removed = db.clear_override(conn, row["persistent_id"], field)
-            detail = queries.item_detail(conn, int(override.group(1)))
+            removed = db.clear_override(conn, key, field)
+            detail = queries.work_detail(conn, key)
         finally:
             conn.close()
         return self.send_json({"cleared": removed, "item": detail})
 
     # --- handlers --------------------------------------------------------
 
-    def set_overrides(self, item_id: int):
-        """Record edits as overrides. Imported values are never written to."""
+    def set_overrides(self, key: str):
+        """Record edits as overrides. No source's own values are written to."""
         body = self._body()
         fields = body.get("fields")
         if not isinstance(fields, dict) or not fields:
@@ -194,14 +193,14 @@ class Handler(BaseHTTPRequestHandler):
 
         conn = self._write()
         try:
-            row = conn.execute(
-                "SELECT persistent_id FROM item WHERE id = ?", (item_id,)
+            exists = conn.execute(
+                "SELECT 1 FROM work WHERE key = ?", (key,)
             ).fetchone()
-            if row is None or not row["persistent_id"]:
-                return self.send_json({"error": "no such item"}, status=404)
+            if not exists:
+                return self.send_json({"error": "no such film"}, status=404)
             for field, value in fields.items():
-                db.set_override(conn, row["persistent_id"], field, value)
-            detail = queries.item_detail(conn, item_id)
+                db.set_override(conn, key, field, value)
+            detail = queries.work_detail(conn, key)
         finally:
             conn.close()
         return self.send_json({"ok": True, "item": detail})

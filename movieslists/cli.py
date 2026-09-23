@@ -217,7 +217,7 @@ WANTED_CHOICES = {"reviews": "review", "ratings": "rating", "dates": "played_dat
 def cmd_letterboxd(args) -> int:
     import sqlite3
 
-    from . import db, letterboxd
+    from . import db, letterboxd, works
 
     database = _database(args)
     if not database.exists():
@@ -230,72 +230,62 @@ def cmd_letterboxd(args) -> int:
     _attach_and_merge(conn, args)
     try:
         if args.status:
-            for key, value in letterboxd.status(conn).items():
-                print(f"{key:>16}: {value}")
+            for key, value in works.stats(conn).items():
+                print(f"{key:>10}: {value}")
+            row = conn.execute(
+                "SELECT COUNT(*), SUM(rating IS NOT NULL), SUM(review IS NOT NULL), "
+                "SUM(watchlisted_date IS NOT NULL), SUM(liked_date IS NOT NULL) "
+                "FROM lb_film").fetchone()
+            print(f"\n letterboxd films: {row[0] or 0}")
+            print(f"    rated         : {row[1] or 0}")
+            print(f"    reviewed      : {row[2] or 0}")
+            print(f"    watchlisted   : {row[3] or 0}")
+            print(f"    liked         : {row[4] or 0}")
+            print(f"    diary entries : "
+                  f"{conn.execute('SELECT COUNT(*) FROM lb_diary').fetchone()[0]}")
+            print(f"    lists         : "
+                  f"{conn.execute('SELECT COUNT(*) FROM lb_list').fetchone()[0]}")
             return 0
 
-        if args.queue:
-            rows = letterboxd.queue(conn)
-            if not rows:
-                print("nothing queued")
-                return 0
-            print(f"{len(rows)} entries awaiting confirmation:\n")
-            for row in rows:
-                year = row["year"] or "----"
-                print(f"  [{row['id']}] {row['title']} ({year}) - {row['match_reason']}")
-                for item in row["candidate_items"]:
-                    print(f"        candidate {item['id']}: {item['name']} "
-                          f"({item['year'] or '----'})")
-            print("\nconfirm with: movieslists letterboxd --accept ENTRY:ITEM")
-            print("reject with:  movieslists letterboxd --reject ENTRY")
-            return 0
-
-        wanted = {WANTED_CHOICES[w] for w in args.include}
-
-        if args.accept:
-            entry_id, _, item_id = args.accept.partition(":")
-            result = letterboxd.resolve(conn, int(entry_id), int(item_id), wanted,
-                                        dates=args.dates)
-            print(f"applied to {result['item']['name']}: "
-                  f"{', '.join(result['fields']) or 'nothing new'}")
-            return 0
-
-        if args.reject:
-            letterboxd.resolve(conn, int(args.reject), None, wanted)
-            print("rejected")
+        if args.relink:
+            counts = works.rebuild(conn)
+            print(f"linked {counts['tv']} TV.app movies and {counts['lb']} "
+                  f"Letterboxd films; {counts['merged']} joined by year drift")
+            for key, value in works.stats(conn).items():
+                print(f"{key:>10}: {value}")
             return 0
 
         if not args.export:
-            print("error: give the path to a Letterboxd export "
-                  "(.zip, folder or .csv), or use --queue / --status",
-                  file=sys.stderr)
+            print("error: give the path to a Letterboxd export (.zip or folder), "
+                  "or use --status / --relink", file=sys.stderr)
             return 1
 
         try:
-            summary = letterboxd.import_export(
-                conn, Path(args.export), wanted, dates=args.dates,
-                force=args.force, dry_run=args.dry_run,
-            )
+            result = letterboxd.import_full(conn, Path(args.export))
         except ValueError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 1
+        print(f"read {result['files']} files: {result['films']} films, "
+              f"{result['entries']} diary entries and reviews, "
+              f"{result['lists']} lists")
 
-        head = "would apply" if args.dry_run else "applied"
-        print(f"read {summary['entries']} entries: {head} {summary['applied']}, "
-              f"queued {summary['queued']}, unmatched {summary['unmatched']}, "
-              f"skipped {summary['skipped']}")
-        if not args.dry_run:
-            print(f"wrote {summary['fields']} field overrides")
-        if args.verbose:
-            for row in summary["rows"]:
-                mark = {"applied": "ok", "queued": "??", "unmatched": "--",
-                        "skipped": "==" }.get(row["status"], "  ")
-                target = f" -> {row['matched']} ({row['matched_year']})" if row["matched"] else ""
-                print(f"  {mark} {row['title']} ({row['year'] or '----'}){target}"
-                      f"  [{row['reason']}]")
-        if summary["queued"]:
-            print(f"\n{summary['queued']} need confirmation: "
-                  "movieslists letterboxd --queue")
+        counts = works.rebuild(conn)
+        moved = works.migrate_overrides(conn)
+        if moved:
+            print(f"moved {moved} edits onto their works")
+        # Ratings and reviews now live in lb_film and are read from there, so
+        # the copies a previous import made into the override table are stale
+        # duplicates rather than edits.
+        stale = conn.execute(
+            "DELETE FROM work_override WHERE source = 'letterboxd'").rowcount
+        conn.commit()
+        if stale:
+            print(f"dropped {stale} override copies now read from lb_film directly")
+
+        print(f"\nlinked {counts['tv']} TV.app movies and {counts['lb']} "
+              f"Letterboxd films")
+        for key, value in works.stats(conn).items():
+            print(f"{key:>10}: {value}")
         return 0
     finally:
         conn.close()
@@ -535,24 +525,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     lb.add_argument("export", nargs="?",
                     help="the export .zip, an unpacked folder, or a single .csv")
-    lb.add_argument("--include", nargs="+", choices=sorted(WANTED_CHOICES),
-                    default=["reviews", "ratings", "dates"],
-                    help="what to import (default: all three)")
-    lb.add_argument("--dates", choices=["fill-missing", "prefer-letterboxd"],
-                    default="fill-missing",
-                    help="'fill-missing' only dates films TV.app never dated "
-                         "(default); 'prefer-letterboxd' overrides TV.app's own")
-    lb.add_argument("--force", action="store_true",
-                    help="also overwrite edits you made by hand")
-    lb.add_argument("--dry-run", action="store_true",
-                    help="report what would happen, change nothing")
-    lb.add_argument("--verbose", action="store_true", help="list every entry")
-    lb.add_argument("--queue", action="store_true",
-                    help="list entries awaiting confirmation")
-    lb.add_argument("--accept", metavar="ENTRY:ITEM",
-                    help="confirm a queued entry against a library item")
-    lb.add_argument("--reject", metavar="ENTRY", help="discard a queued entry")
-    lb.add_argument("--status", action="store_true", help="summarise past imports")
+    lb.add_argument("--relink", action="store_true",
+                    help="rebuild the links between TV.app and Letterboxd")
+    lb.add_argument("--status", action="store_true",
+                    help="summarise what has been imported and linked")
     lb.set_defaults(func=cmd_letterboxd)
 
     cfg = sub.add_parser("config", help="show or change where shared edits live")
