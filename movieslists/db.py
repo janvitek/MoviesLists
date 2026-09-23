@@ -14,7 +14,7 @@ import sqlite3
 from pathlib import Path
 
 # Bumped whenever the column set changes; a mismatch rebuilds the cache.
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 # (JSON key from extract.js, SQL column, SQL type). Order defines the table.
 COLUMNS: list[tuple[str, str, str]] = [
@@ -318,22 +318,38 @@ CREATE TABLE IF NOT EXISTS lb_profile (
 
 CREATE INDEX IF NOT EXISTS idx_lb_film_year ON lb_film(year);
 
--- Posters for films that are not in TV.app, which therefore have no artwork
--- of their own. Looked up by title and year at a poster service; the answer
--- is kept so a title is never searched twice, including the misses.
-CREATE TABLE IF NOT EXISTS poster (
-    work_key   TEXT PRIMARY KEY,
-    service    TEXT NOT NULL,          -- tmdb
-    remote_id  TEXT,
-    remote_path TEXT,
-    title      TEXT,
-    year       INTEGER,
-    status     TEXT NOT NULL,          -- ok | none | error
-    detail     TEXT,
-    fetched_at TEXT NOT NULL
+-- A third source, on the same footing as the other two: what TMDb says about
+-- a film. Fetched for films TV.app does not have, which would otherwise show
+-- no director, genre, runtime or artwork at all.
+--
+-- Kept verbatim like the others; the read side decides what to prefer. The
+-- row is written even when the lookup finds nothing, so a title is searched
+-- once and not again.
+CREATE TABLE IF NOT EXISTS tmdb_film (
+    work_key       TEXT PRIMARY KEY,
+    tmdb_id        TEXT,
+    imdb_id        TEXT,
+    title          TEXT,
+    original_title TEXT,
+    year           INTEGER,
+    release_date   TEXT,
+    runtime        INTEGER,            -- minutes, as TMDb gives them
+    overview       TEXT,
+    genres         TEXT,               -- comma separated, TMDb's order
+    directors      TEXT,               -- comma separated
+    cast_list      TEXT,
+    original_language TEXT,
+    poster_path    TEXT,
+    vote_average   REAL,
+    vote_count     INTEGER,
+    searched_title TEXT,               -- what we asked for
+    searched_year  INTEGER,
+    status         TEXT NOT NULL,      -- ok | none | error
+    detail         TEXT,
+    fetched_at     TEXT NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS idx_poster_status ON poster(status);
+CREATE INDEX IF NOT EXISTS idx_tmdb_status ON tmdb_film(status);
 
 CREATE TABLE IF NOT EXISTS sync_run (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -439,6 +455,7 @@ def connect(path: Path) -> sqlite3.Connection:
             "DROP TABLE IF EXISTS work_title;"
             "DROP TABLE IF EXISTS work_source;"
             "DROP TABLE IF EXISTS work;"
+            "DROP TABLE IF EXISTS poster;"
         )
     conn.executescript(SCHEMA)
     _add_missing_columns(conn)

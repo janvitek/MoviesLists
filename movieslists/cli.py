@@ -466,7 +466,7 @@ def cmd_doctor(args) -> int:
     return 1 if problems else 0
 
 
-def cmd_posters(args) -> int:
+def cmd_tmdb(args) -> int:
     from . import posters
 
     database = _database(args)
@@ -485,18 +485,23 @@ def cmd_posters(args) -> int:
         return 0
 
     def progress(done, total, counts):
-        print(f"  {done}/{total}  found {counts['found']}, "
-              f"no poster {counts['missing']}, errors {counts['errors']}")
+        print(f"  {done}/{total}  described {counts['found']} "
+              f"({counts['directors']} with a director), "
+              f"posters {counts['posters']}, not found {counts['missing']}, "
+              f"errors {counts['errors']}")
 
     try:
         result = posters.fetch(database, limit=args.limit, refresh=args.refresh,
+                               with_posters=not args.no_posters,
+                               include_gaps=args.include_gaps,
                                progress=progress)
     except RuntimeError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    print(f"looked up {result['looked_up']}: found {result['found']}, "
-          f"no poster {result['missing']}, errors {result['errors']}; "
-          f"{result['remaining']} still to do")
+    print(f"looked up {result['looked_up']}: described {result['found']} "
+          f"({result['directors']} with a director), "
+          f"{result['posters']} posters, {result['missing']} not found, "
+          f"{result['errors']} errors; {result['remaining']} still to do")
     return 0
 
 
@@ -585,19 +590,26 @@ def build_parser() -> argparse.ArgumentParser:
     snap.add_argument("--reason", default="manual", help="note stored in the snapshot")
     snap.set_defaults(func=cmd_snapshot)
 
-    pos = sub.add_parser(
-        "posters",
-        help="fetch posters for films that are not in TV.app",
-        description="Films known only to Letterboxd have no artwork, so "
-                    "posters are looked up at TMDb by title and year. This is "
-                    "the only part of the app that uses the network, and it "
+    tm = sub.add_parser(
+        "tmdb",
+        help="fill in director, genre, runtime, synopsis and poster from TMDb",
+        description="A Letterboxd export carries a title, a year and your own "
+                    "opinions -- no director, genre, runtime, synopsis or "
+                    "image. This looks those up at TMDb for the films TV.app "
+                    "does not have. It is the only part of the app that uses "
+                    "the network, it sends only a title and a year, and it "
                     "needs a free TMDb key.",
     )
-    pos.add_argument("--limit", type=int, default=None, help="stop after this many")
-    pos.add_argument("--refresh", action="store_true",
-                     help="look up titles that previously found nothing")
-    pos.add_argument("--status", action="store_true", help="report what is cached")
-    pos.set_defaults(func=cmd_posters)
+    tm.add_argument("--limit", type=int, default=None, help="stop after this many")
+    tm.add_argument("--refresh", action="store_true",
+                    help="look up titles that previously found nothing")
+    tm.add_argument("--no-posters", action="store_true",
+                    help="fetch the metadata but not the images")
+    tm.add_argument("--include-gaps", action="store_true",
+                    help="also look up films TV.app has but left without a "
+                         "director")
+    tm.add_argument("--status", action="store_true", help="report what is cached")
+    tm.set_defaults(func=cmd_tmdb)
 
     doc = sub.add_parser("doctor", help="check for sync and integrity problems")
     doc.set_defaults(func=cmd_doctor)

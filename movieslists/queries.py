@@ -62,6 +62,23 @@ def _tv_side(conn):
     return rows
 
 
+def _tmdb_side(conn):
+    """What TMDb says, for films the other two describe poorly."""
+    return {
+        row["work_key"]: dict(row)
+        for row in conn.execute(
+            "SELECT work_key, tmdb_id, imdb_id, title, original_title, year, "
+            "       runtime, overview, genres, directors, cast_list, "
+            "       poster_path, vote_average FROM tmdb_film WHERE status = 'ok'"
+        )
+    }
+
+
+def _first(value):
+    """TMDb lists genres and directors comma separated, most telling first."""
+    return value.split(", ")[0] if value else None
+
+
 def _lb_side(conn):
     films = {}
     for row in conn.execute(
@@ -96,6 +113,7 @@ def library(conn: sqlite3.Connection, art_ids: set[int] | None = None,
     poster_keys = poster_keys or set()
     tv = _tv_side(conn)
     lb_films, lb_entries, lb_reviews = _lb_side(conn)
+    tmdb = _tmdb_side(conn)
     edits = db.overrides(conn)
 
     rows = []
@@ -104,6 +122,8 @@ def library(conn: sqlite3.Connection, art_ids: set[int] | None = None,
         t = tv.get(key)
         f = lb_films.get(key)
         e = lb_entries.get(key)
+        # TMDb fills in only what the film's own sources left blank.
+        m = tmdb.get(key) or {}
         override = edits.get(key) or {}
 
         sources = ("both" if t and (f or e) else "tv" if t else "lb")
@@ -124,9 +144,10 @@ def library(conn: sqlite3.Connection, art_ids: set[int] | None = None,
         values = {
             "key": key,
             "name": (t or {}).get("name") or (f or {}).get("name") or work["title"],
-            "year": (t or {}).get("year") or (f or {}).get("year") or work["year"],
-            "genre": (t or {}).get("genre"),
-            "director": (t or {}).get("director"),
+            "year": ((t or {}).get("year") or (f or {}).get("year")
+                     or work["year"] or m.get("year")),
+            "genre": (t or {}).get("genre") or _first(m.get("genres")),
+            "director": (t or {}).get("director") or m.get("directors"),
             "media_kind": (t or {}).get("media_kind") or "movie",
             "show": (t or {}).get("show"),
             "season_number": (t or {}).get("season_number"),
@@ -134,7 +155,9 @@ def library(conn: sqlite3.Connection, art_ids: set[int] | None = None,
             "played_count": played_count,
             "played_date": played_date,
             "date_added": (t or {}).get("date_added") or (f or {}).get("watched_date"),
-            "duration": (t or {}).get("duration"),
+            # TMDb gives minutes; everything here is seconds.
+            "duration": ((t or {}).get("duration")
+                         or (m.get("runtime") * 60 if m.get("runtime") else None)),
             # TV.app rates nothing, so a star comes from Letterboxd unless
             # overridden here.
             "rating": db.coerce("rating", None) if False else (
@@ -275,6 +298,7 @@ def stats(conn: sqlite3.Connection) -> dict:
         "open_questions": one("SELECT COUNT(*) FROM link_decision "
                               "WHERE status = 'open'"),
         "titles": one("SELECT COUNT(*) FROM work_title"),
+        "tmdb_described": one("SELECT COUNT(*) FROM tmdb_film WHERE status = 'ok'"),
     }
 
 
@@ -283,6 +307,11 @@ def work_detail(conn: sqlite3.Connection, key: str) -> dict | None:
     work = conn.execute("SELECT * FROM work WHERE key = ?", (key,)).fetchone()
     if work is None:
         return None
+
+    tmdb = conn.execute(
+        "SELECT * FROM tmdb_film WHERE work_key = ? AND status = 'ok'", (key,)
+    ).fetchone()
+    tmdb = dict(tmdb) if tmdb else {}
 
     tv = [
         dict(r) for r in conn.execute(
@@ -317,12 +346,14 @@ def work_detail(conn: sqlite3.Connection, key: str) -> dict | None:
     film = films[0] if films else {}
     effective = {
         "name": primary.get("name") or film.get("name") or work["title"],
-        "year": primary.get("year") or film.get("year") or work["year"],
-        "genre": primary.get("genre"),
-        "director": primary.get("director"),
+        "year": (primary.get("year") or film.get("year") or work["year"]
+                 or tmdb.get("year")),
+        "genre": primary.get("genre") or _first(tmdb.get("genres")),
+        "director": primary.get("director") or tmdb.get("directors"),
         "media_kind": primary.get("media_kind") or "movie",
-        "duration": primary.get("duration"),
-        "long_description": primary.get("long_description"),
+        "duration": (primary.get("duration")
+                     or (tmdb.get("runtime") * 60 if tmdb.get("runtime") else None)),
+        "long_description": primary.get("long_description") or tmdb.get("overview"),
         "played_count": max(primary.get("played_count") or 0, len(entries)),
         "played_date": max(
             [d for d in (primary.get("played_date"),
@@ -345,7 +376,7 @@ def work_detail(conn: sqlite3.Connection, key: str) -> dict | None:
     return {
         "key": key,
         "work": dict(work),
-        "sources": {"tv": tv, "letterboxd": films},
+        "sources": {"tv": tv, "letterboxd": films, "tmdb": tmdb or None},
         "entries": entries,
         "lists": lists,
         "overrides": override,

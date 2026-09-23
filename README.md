@@ -167,24 +167,37 @@ because they come from title and year, so a stored answer still names the same
 two films after a rebuild, and `rebuild` replays it. Either answer is kept, so
 a pair is never raised twice.
 
-## Posters
+## TMDb, the third source
 
-Films that are not in TV.app have no artwork, and a Letterboxd export contains
-no images. `movieslists posters` looks them up at TMDb by title and year.
+A Letterboxd export carries a title, a year and your own opinions — no
+director, genre, runtime, synopsis or image. So a film you have watched but do
+not own arrives almost bare, while one from TV.app arrives with all of it.
 
-This is the only part of the app that uses the network, and it is off until
-you configure a key:
+TMDb fills that in, and is treated as a source like the other two rather than
+as decoration: its answers are stored verbatim in `tmdb_film`, nothing is
+copied into the other tables, and the read side decides what to prefer. A
+film's own sources always win; TMDb only supplies what they left blank.
 
 ```sh
 # a free key from https://www.themoviedb.org/settings/api
 echo YOUR_KEY > ~/.config/movieslists/tmdb.key
-movieslists posters --status
-movieslists posters
+
+movieslists tmdb --status
+movieslists tmdb                  # the films TV.app does not have
+movieslists tmdb --include-gaps   # and the ones it files under "Unknown"
 ```
 
-The key is read from that file or `TMDB_API_KEY`, never from a command-line
-flag, since an argument ends up in shell history. Every lookup is recorded
-including the misses, so a title is searched once and not again.
+This is the only part of the app that uses the network. It sends a title and a
+year, nothing else, and does nothing at all until a key is configured. The key
+is read from that file or `TMDB_API_KEY`, never from a command-line flag,
+since an argument ends up in shell history.
+
+Director is taken from the crew credits, so a producer or screenwriter is not
+mistaken for one, and a film with two directors keeps both. Runtime arrives in
+minutes and is stored as seconds like everything else. Every lookup is
+recorded including the misses, so a title is searched once and not again, and
+TMDb's title and original title are fed back into the titles table — an
+original title is exactly what a later import might arrive spelling.
 
 ## Two machines, one shared folder
 

@@ -1,13 +1,15 @@
-"""Posters for films that exist only on Letterboxd.
+"""TMDb: a third source, for the films the other two describe poorly.
 
-A Letterboxd export contains no images, and those films are not in TV.app, so
-they have no artwork of their own. The only way to show one is to ask a poster
-service, which means sending the title and year out of this machine -- the one
-place this app talks to the network, and only when you have configured a key.
+A Letterboxd export carries a title, a year and your own opinions -- no
+director, genre, runtime, synopsis or image. So a film you have watched but do
+not own arrives almost bare, while one from TV.app arrives with all of it.
+TMDb fills that in, which makes it a source like the others rather than a
+decoration: its answers are stored verbatim in `tmdb_film` and the read side
+decides what to prefer.
 
-TMDb is used because it is free for personal use, indexes by title and year,
-and is what Letterboxd itself draws artwork from. Every lookup is recorded,
-misses included, so a title is searched once and not again.
+This is the one place the app talks to the network, it sends only a title and
+a year, and it does nothing at all until a key is configured. Every lookup is
+recorded including the misses, so a title is searched once and not again.
 """
 
 from __future__ import annotations
@@ -24,6 +26,7 @@ from pathlib import Path
 from . import artwork, db, sharing
 
 SEARCH_URL = "https://api.themoviedb.org/3/search/movie"
+DETAIL_URL = "https://api.themoviedb.org/3/movie"
 IMAGE_BASE = "https://image.tmdb.org/t/p"
 FULL_SIZE, THUMB_SIZE = "w500", "w185"
 KEY_FILE = sharing.CONFIG_DIR / "tmdb.key"
@@ -49,6 +52,45 @@ def api_key(explicit: str | None = None) -> str | None:
     return None
 
 
+def details(tmdb_id: str, key: str) -> dict:
+    """Full record for one film, with credits in the same round trip."""
+    params = urllib.parse.urlencode({"api_key": key,
+                                     "append_to_response": "credits"})
+    try:
+        return json.loads(_request(f"{DETAIL_URL}/{tmdb_id}?{params}"))
+    except urllib.error.HTTPError as exc:
+        raise RuntimeError(f"TMDb returned HTTP {exc.code} for film {tmdb_id}") from exc
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"could not reach TMDb: {exc}") from exc
+
+
+def parse_details(payload: dict) -> dict:
+    """Pick out the fields that make a Letterboxd film look like a TV.app one."""
+    crew = (payload.get("credits") or {}).get("crew") or []
+    directors = [c.get("name") for c in crew
+                 if c.get("job") == "Director" and c.get("name")]
+    people = (payload.get("credits") or {}).get("cast") or []
+    release = payload.get("release_date") or ""
+    return {
+        "tmdb_id": str(payload.get("id")) if payload.get("id") else None,
+        "imdb_id": payload.get("imdb_id") or None,
+        "title": payload.get("title") or None,
+        "original_title": payload.get("original_title") or None,
+        "year": int(release[:4]) if release[:4].isdigit() else None,
+        "release_date": release or None,
+        "runtime": payload.get("runtime") or None,
+        "overview": payload.get("overview") or None,
+        "genres": ", ".join(g["name"] for g in payload.get("genres") or []
+                            if g.get("name")) or None,
+        "directors": ", ".join(directors) or None,
+        "cast_list": ", ".join(p["name"] for p in people[:8] if p.get("name")) or None,
+        "original_language": payload.get("original_language") or None,
+        "poster_path": payload.get("poster_path") or None,
+        "vote_average": payload.get("vote_average") or None,
+        "vote_count": payload.get("vote_count") or None,
+    }
+
+
 def poster_dirs(database: Path) -> tuple[Path, Path]:
     root = artwork.cache_dir(database) / "posters"
     return root / "full", root / "thumb"
@@ -65,12 +107,28 @@ def have(database: Path) -> set[str]:
     return {p.stem for p in full.glob("*.jpg") if p.stat().st_size > 0}
 
 
-def wanted(conn: sqlite3.Connection, refresh: bool = False) -> list[dict]:
-    """Films with no artwork: the ones Letterboxd knows and TV.app does not."""
+def wanted(conn: sqlite3.Connection, refresh: bool = False,
+           include_gaps: bool = False) -> list[dict]:
+    """Films TMDb could usefully describe.
+
+    By default the ones TV.app does not have, which arrive with nothing but a
+    title and a year. With `include_gaps`, also the ones TV.app does have but
+    left without a director -- it files fifty of them under "Unknown".
+    """
+    clause = (
+        "NOT EXISTS (SELECT 1 FROM work_source s "
+        "            WHERE s.work_id = w.id AND s.source = 'tv')"
+    )
+    if include_gaps:
+        clause += (
+            " OR EXISTS (SELECT 1 FROM work_source s JOIN item i "
+            "            ON i.persistent_id = s.source_id "
+            "            WHERE s.work_id = w.id AND s.source = 'tv' "
+            "            AND (i.director IS NULL OR i.director = '' "
+            "                 OR lower(i.director) IN ('unknown', 'n/a')))"
+        )
     rows = conn.execute(
-        "SELECT w.key, w.title, w.year FROM work w "
-        "WHERE NOT EXISTS (SELECT 1 FROM work_source s "
-        "                  WHERE s.work_id = w.id AND s.source = 'tv') "
+        f"SELECT w.key, w.title, w.year FROM work w WHERE {clause} "
         "ORDER BY w.title COLLATE NOCASE"
     ).fetchall()
     out = [dict(r) for r in rows]
@@ -79,7 +137,7 @@ def wanted(conn: sqlite3.Connection, refresh: bool = False) -> list[dict]:
     # A previous miss is remembered, so the same title is not searched again.
     known = {
         r[0] for r in conn.execute(
-            "SELECT work_key FROM poster WHERE status IN ('ok', 'none')")
+            "SELECT work_key FROM tmdb_film WHERE status IN ('ok', 'none')")
     }
     return [r for r in out if r["key"] not in known]
 
@@ -117,8 +175,9 @@ def search(title: str, year: int | None, key: str) -> dict | None:
 
 
 def fetch(database: Path, limit: int | None = None, refresh: bool = False,
-          key: str | None = None, progress=None) -> dict:
-    """Look up and download the posters that are missing."""
+          key: str | None = None, with_posters: bool = True,
+          include_gaps: bool = False, progress=None) -> dict:
+    """Look up the films TV.app does not have, and keep what TMDb says."""
     token = api_key(key)
     if not token:
         raise RuntimeError(
@@ -130,18 +189,20 @@ def fetch(database: Path, limit: int | None = None, refresh: bool = False,
 
     conn = db.connect(database)
     try:
-        targets = wanted(conn, refresh)
+        targets = wanted(conn, refresh, include_gaps)
         if limit is not None:
             targets = targets[:limit]
         full_dir, thumb_dir = poster_dirs(database)
         full_dir.mkdir(parents=True, exist_ok=True)
         thumb_dir.mkdir(parents=True, exist_ok=True)
 
-        counts = {"looked_up": 0, "found": 0, "missing": 0, "errors": 0}
+        counts = {"looked_up": 0, "found": 0, "missing": 0, "errors": 0,
+                  "posters": 0, "directors": 0}
         for n, row in enumerate(targets, start=1):
             counts["looked_up"] += 1
             try:
                 match = search(row["title"], row["year"], token)
+                record = parse_details(details(str(match["id"]), token)) if match else None
             except RuntimeError as exc:
                 counts["errors"] += 1
                 _record(conn, row, None, "error", str(exc))
@@ -149,42 +210,76 @@ def fetch(database: Path, limit: int | None = None, refresh: bool = False,
                     raise
                 continue
 
-            if not match:
+            if not record:
                 counts["missing"] += 1
-                _record(conn, row, None, "none", "no poster at TMDb")
+                _record(conn, row, None, "none", "nothing matching at TMDb")
             else:
-                name = f"{_safe(row['key'])}.jpg"
-                try:
-                    (full_dir / name).write_bytes(
-                        _request(f"{IMAGE_BASE}/{FULL_SIZE}{match['poster_path']}"))
-                    (thumb_dir / name).write_bytes(
-                        _request(f"{IMAGE_BASE}/{THUMB_SIZE}{match['poster_path']}"))
-                    counts["found"] += 1
-                    _record(conn, row, match, "ok", None)
-                except (urllib.error.URLError, TimeoutError, OSError) as exc:
-                    counts["errors"] += 1
-                    _record(conn, row, match, "error", str(exc))
+                counts["found"] += 1
+                if record.get("directors"):
+                    counts["directors"] += 1
+                _record(conn, row, record, "ok", None)
+                if with_posters and record.get("poster_path"):
+                    name = f"{_safe(row['key'])}.jpg"
+                    try:
+                        (full_dir / name).write_bytes(
+                            _request(f"{IMAGE_BASE}/{FULL_SIZE}{record['poster_path']}"))
+                        (thumb_dir / name).write_bytes(
+                            _request(f"{IMAGE_BASE}/{THUMB_SIZE}{record['poster_path']}"))
+                        counts["posters"] += 1
+                    except (urllib.error.URLError, TimeoutError, OSError):
+                        counts["errors"] += 1
             if progress and n % 25 == 0:
                 progress(n, len(targets), counts)
             time.sleep(PAUSE_SECONDS)
         conn.commit()
-        counts["remaining"] = len(wanted(conn))
+        record_titles(conn)
+        counts["remaining"] = len(wanted(conn, include_gaps=include_gaps))
         return counts
     finally:
         conn.close()
 
 
-def _record(conn, row, match, status, detail) -> None:
+_FIELDS = ("tmdb_id", "imdb_id", "title", "original_title", "year",
+           "release_date", "runtime", "overview", "genres", "directors",
+           "cast_list", "original_language", "poster_path", "vote_average",
+           "vote_count")
+
+
+def _record(conn, row, record, status, detail) -> None:
+    values = {f: (record or {}).get(f) for f in _FIELDS}
+    values.update({"work_key": row["key"], "searched_title": row["title"],
+                   "searched_year": row["year"], "status": status,
+                   "detail": detail, "fetched_at": db._now_iso()})
+    columns = list(values)
     conn.execute(
-        "INSERT INTO poster (work_key, service, remote_id, remote_path, title, "
-        "year, status, detail, fetched_at) VALUES (?, 'tmdb', ?, ?, ?, ?, ?, ?, ?) "
-        "ON CONFLICT(work_key) DO UPDATE SET remote_id = excluded.remote_id, "
-        "remote_path = excluded.remote_path, status = excluded.status, "
-        "detail = excluded.detail, fetched_at = excluded.fetched_at",
-        (row["key"], str(match["id"]) if match else None,
-         match.get("poster_path") if match else None, row["title"], row["year"],
-         status, detail, db._now_iso()),
+        f"INSERT INTO tmdb_film ({', '.join(columns)}) "
+        f"VALUES ({', '.join(':' + c for c in columns)}) "
+        "ON CONFLICT(work_key) DO UPDATE SET "
+        + ", ".join(f"{c} = excluded.{c}" for c in columns if c != "work_key"),
+        values,
     )
+
+
+def record_titles(conn: sqlite3.Connection) -> int:
+    """Feed TMDb's titles back into the titles table.
+
+    An original title is another name the film is genuinely known by, and is
+    exactly what a later import might arrive spelling.
+    """
+    from . import works
+
+    added = 0
+    for row in conn.execute(
+        "SELECT t.work_key, t.title, t.original_title, t.year, w.id "
+        "FROM tmdb_film t JOIN work w ON w.key = t.work_key "
+        "WHERE t.status = 'ok'"
+    ).fetchall():
+        for name in (row["title"], row["original_title"]):
+            if name:
+                works.record_title(conn, row["id"], name, row["year"], "tmdb")
+                added += 1
+    conn.commit()
+    return added
 
 
 def summary(database: Path) -> dict:
@@ -194,11 +289,16 @@ def summary(database: Path) -> dict:
     conn = db.connect(database)
     try:
         by_status = {r[0]: r[1] for r in conn.execute(
-            "SELECT status, COUNT(*) FROM poster GROUP BY status")}
+            "SELECT status, COUNT(*) FROM tmdb_film GROUP BY status")}
+        with_director = conn.execute(
+            "SELECT COUNT(*) FROM tmdb_film WHERE directors IS NOT NULL").fetchone()[0]
         pending = len(wanted(conn))
     finally:
         conn.close()
-    return {"downloaded": count(full), "thumbnails": count(thumb),
-            "bytes": size(full) + size(thumb), "not_found": by_status.get("none", 0),
-            "errors": by_status.get("error", 0), "pending": pending,
+    return {"films_described": by_status.get("ok", 0),
+            "with_a_director": with_director,
+            "not_found": by_status.get("none", 0),
+            "errors": by_status.get("error", 0),
+            "posters": count(full), "thumbnails": count(thumb),
+            "bytes": size(full) + size(thumb), "pending": pending,
             "key_configured": bool(api_key())}
