@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>MoviesLists</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div class="banner banner--alert" id="alert" hidden>
+  <div class="banner-body">
+    <strong id="alertTitle"></strong>
+    <div id="alertList" class="banner-list"></div>
+  </div>
+  <button class="banner-close" id="alertDismiss">Dismiss</button>
+</div>
+
+<div class="banner banner--info" id="notice" hidden>
+  <div class="banner-body"><span id="noticeText"></span></div>
+  <button class="banner-close" id="noticeDismiss">Dismiss</button>
+</div>
+
+<header class="topbar">
+  <div class="brand">
+    <h1>Library</h1>
+    <p class="subtitle" id="subtitle">loading…</p>
+  </div>
+  <nav class="tabs" id="tabs" role="tablist">
+    <button class="tab is-active" data-view="movies" role="tab">Movies</button>
+    <button class="tab" data-view="episodes" role="tab">Episodes</button>
+    <button class="tab" data-view="shows" role="tab">Shows</button>
+    <button class="tab" data-view="directors" role="tab">Directors</button>
+  </nav>
+</header>
+
+<div class="toolbar">
+  <label class="search">
+    <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M7 1a6 6 0 104.2 10.2l3.3 3.3 1-1-3.3-3.3A6 6 0 007 1zm0 1.5A4.5 4.5 0 112.5 7 4.5 4.5 0 017 2.5z"/></svg>
+    <input id="search" type="search" placeholder="Search titles, directors, shows…"
+           autocomplete="off" spellcheck="false">
+  </label>
+  <select id="genre"  class="filter"><option value="">All genres</option></select>
+  <select id="decade" class="filter"><option value="">All decades</option></select>
+  <select id="played" class="filter">
+    <option value="">Watched or not</option>
+    <option value="dated">Has a play date</option>
+    <option value="played">Played, date unknown</option>
+    <option value="any">Played at all</option>
+    <option value="never">Never played</option>
+  </select>
+  <select id="sort" class="filter">
+    <option value="title">Sort by title</option>
+    <option value="year-desc">Newest first</option>
+    <option value="year-asc">Oldest first</option>
+    <option value="played-desc">Recently played</option>
+    <option value="added-desc">Recently added</option>
+    <option value="director">By director</option>
+  </select>
+  <button id="reset" class="ghost" hidden>Clear</button>
+  <span class="count" id="count"></span>
+</div>
+
+<main>
+  <div class="listhead" id="listhead"></div>
+  <div class="scroller" id="scroller">
+    <div class="sizer" id="sizer"></div>
+    <div class="rows" id="rows"></div>
+  </div>
+  <p class="empty" id="empty" hidden>Nothing matches those filters.</p>
+</main>
+
+<aside class="detail" id="detail" hidden>
+  <button class="close" id="detailClose" aria-label="Close">&times;</button>
+  <div id="detailBody"></div>
+</aside>
+<div class="scrim" id="scrim" hidden></div>
+
+<p class="footnote" id="footnote"></p>
+
+<script src="app.js"></script>
+</body>
+</html>
