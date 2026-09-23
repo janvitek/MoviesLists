@@ -499,6 +499,8 @@ function renderMarkdown(source) {
 
   const inline = (text) => text
     .replace(/`([^`]+)`/g, '<code>$1</code>')
+    // *** *** first, or the bold rule would claim two of the three stars.
+    .replace(/\*\*\*([^*]+)\*\*\*/g, '<strong><em>$1</em></strong>')
     .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
     .replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>')
     .replace(/(^|[^_\w])_([^_\n]+)_/g, '$1<em>$2</em>')

@@ -198,6 +198,15 @@ Reviews, ratings and watch dates are imported. Ratings convert exactly:
 Letterboxd's half-star scale is twenty points a star on TV.app's 0–100 scale,
 so 3.5 stars is 70.
 
+Letterboxd stores reviews as HTML, and this app stores Markdown, so reviews
+are converted on the way in: `<b>`/`<i>`/`<em>`/`<strong>`, `<a href>`,
+`<blockquote>` and `<br>` all have Markdown equivalents. Two details that
+real exports turn out to need — the editor emits attributes
+(`<i style="-webkit-text-size-adjust: 100%;">`), and an unclosed `<i>` should
+still produce balanced emphasis rather than a stray tag. Tags outside that
+set are left as literal text, because a review mentioning `<expletive>` in
+angle brackets means the word.
+
 **Matching is the hard part.** A Letterboxd export identifies films by
 LetterboxdURI, tmdbID and imdbID; TV.app exposes none of the three, so title
 and year are the only common ground. Titles are folded to compare —

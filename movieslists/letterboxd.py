@@ -30,34 +30,74 @@ from . import db
 # film appears twice (diary carries the richest per-viewing detail).
 EXPORT_FILES = ("watched.csv", "ratings.csv", "reviews.csv", "diary.csv")
 
-# Editions and re-releases that a library title carries but Letterboxd's does
-# not -- "Alien (The Director's Cut)", "Memories of Murder (Subtitled)".
-_EDITION = re.compile(
-    r"\s*\((?:the\s+)?(?:"
-    r"subtitled|dubbed|uncut|unrated|remastered|redux|"
-    r"(?:restored|director'?s|theatrical|extended|final|special|collector'?s)"
-    r"\s+(?:cut|edition|version)|"
-    r"restored|\d{4}"
-    r")\)\s*$",
+# Words that mark a trailing parenthetical as an edition or format note
+# rather than part of the title: "(Unrated Director's Cut)", "(Swedish With
+# English Subtitles)", "(2011)". Keyword-based rather than an exact list,
+# because this library alone carries 68 distinct parentheticals.
+_EDITION_WORDS = re.compile(
+    r"\b(?:subtitle[sd]?|subtitles|dubbed|dub|cut|edition|version|remaster(?:ed)?|"
+    r"unrated|uncut|redux|restored|director'?s|theatrical|extended|special|"
+    r"final|collector'?s|anniversary|imax|3d|remux|widescreen|fullscreen)\b",
     re.I,
 )
+_TRAILING_PAREN = re.compile(r"\s*\(([^()]+)\)\s*$")
 _PUNCT = re.compile(r"[^\w\s]", re.UNICODE)
 _SPACE = re.compile(r"\s+")
 
 
-def normalize_title(title: str) -> str:
-    """Fold a title down to something two sources can agree on."""
-    text = unicodedata.normalize("NFKD", title or "")
+def _is_edition(text: str) -> bool:
+    """True when a parenthetical is an edition note, not an alternate title."""
+    stripped = text.strip()
+    if re.fullmatch(r"(?:19|20)\d{2}", stripped):      # a bare year
+        return True
+    return bool(_EDITION_WORDS.search(stripped))
+
+
+def _fold(text: str) -> str:
+    text = unicodedata.normalize("NFKD", text or "")
     text = "".join(c for c in text if not unicodedata.combining(c))
     text = text.replace("&", " and ")
-    # Strip repeatedly: "Blade Runner (The Final Cut) (1982)".
-    while True:
-        stripped = _EDITION.sub("", text)
-        if stripped == text:
-            break
-        text = stripped
     text = _PUNCT.sub(" ", text).lower()
     return _SPACE.sub(" ", text).strip()
+
+
+def normalize_title(title: str) -> str:
+    """Fold a title down to something two sources can agree on.
+
+    Trailing edition notes are dropped; an alternate title in parentheses is
+    kept here and surfaced separately by `title_keys`.
+    """
+    text = title or ""
+    while True:
+        match = _TRAILING_PAREN.search(text)
+        if not match or not _is_edition(match.group(1)):
+            break
+        text = text[:match.start()]
+    return _fold(text)
+
+
+def title_keys(title: str) -> set[str]:
+    """Every name a film might reasonably be found under.
+
+    "A Prophet (Un prophète)" is findable as both "a prophet" and
+    "un prophete", because Letterboxd may list either.
+    """
+    keys = {normalize_title(title)}
+    text = title or ""
+    while True:
+        match = _TRAILING_PAREN.search(text)
+        if not match:
+            break
+        inner = match.group(1)
+        text = text[:match.start()]
+        if not _is_edition(inner):
+            folded = _fold(inner)
+            # Ignore fragments too short to identify anything.
+            if len(folded) >= 3 and any(c.isalpha() for c in folded):
+                keys.add(folded)
+            keys.add(_fold(text))
+    keys.discard("")
+    return keys
 
 
 # --------------------------------------------------------------- reading
@@ -138,7 +178,7 @@ def read_export(path: Path) -> list[dict]:
             if rating is not None:
                 entry["rating"] = rating
             if row.get("review"):
-                entry["review"] = row["review"]
+                entry["review"] = html_to_markdown(row["review"])
             if row.get("tags"):
                 entry["tags"] = row["tags"]
             if str(row.get("rewatch", "")).lower() in ("yes", "true", "1"):
@@ -176,6 +216,67 @@ def _rating(row) -> float | None:
     return None
 
 
+# Letterboxd stores reviews as HTML; this library keeps them as Markdown.
+# Only the tags Letterboxd's editor actually produces are translated --
+# anything else is left as literal text, because a review that mentions
+# <expletive> in angle brackets means the word, not a tag.
+_TAG_BR = re.compile(r"<\s*br\s*/?\s*>", re.I)
+_TAG_LINK = re.compile(r'<\s*a\b[^>]*?href\s*=\s*["\']([^"\']+)["\'][^>]*>(.*?)<\s*/\s*a\s*>',
+                       re.I | re.S)
+_TAG_QUOTE = re.compile(r"<\s*blockquote[^>]*>(.*?)<\s*/\s*blockquote\s*>", re.I | re.S)
+# Letterboxd's editor emits attributes -- <i style="-webkit-text-size-adjust:
+# 100%;"> -- so these must tolerate anything up to the closing bracket. The
+# \b after the name keeps <b> from also swallowing <blockquote>.
+_TAG_BOLD = re.compile(r"<\s*/?\s*(?:b|strong)\b[^>]*>", re.I)
+_TAG_ITALIC = re.compile(r"<\s*/?\s*(?:i|em)\b[^>]*>", re.I)
+_TAG_STRIKE = re.compile(r"<\s*/?\s*(?:del|s|strike)\b[^>]*>", re.I)
+_TAG_PARA = re.compile(r"<\s*/?\s*p\b[^>]*>", re.I)
+
+# Anything of Letterboxd's own making that survives the passes above -- an
+# orphaned </a>, a stray <span> -- is dropped. Tags outside this set are left
+# alone, because a review saying <expletive> means the word.
+_TAG_LEFTOVER = re.compile(
+    r"<\s*/?\s*(?:a|b|i|em|strong|br|p|blockquote|span|u|div|font)\b[^>]*>", re.I
+)
+
+
+def html_to_markdown(text: str | None) -> str | None:
+    """Convert a Letterboxd review's HTML into the Markdown this app stores."""
+    if not text:
+        return text
+    import html as html_module
+
+    out = _TAG_BR.sub("\n", text)
+    out = _TAG_PARA.sub("\n\n", out)
+    out = _TAG_LINK.sub(lambda m: f"[{m.group(2).strip()}]({m.group(1)})", out)
+    out = _TAG_QUOTE.sub(
+        lambda m: "\n" + "\n".join(
+            f"> {line.strip()}" for line in m.group(1).strip().splitlines() if line.strip()
+        ) + "\n",
+        out,
+    )
+    # Open and close both become the same marker, so an unclosed <i> -- which
+    # does occur -- still yields a balanced pair rather than a stray tag.
+    out = _TAG_BOLD.sub("**", out)
+    out = _TAG_ITALIC.sub("*", out)
+    out = _TAG_STRIKE.sub("~~", out)
+    out = _TAG_LEFTOVER.sub("", out)
+    out = html_module.unescape(out)
+    out = out.replace("\xa0", " ")
+    # Markdown wants no space just inside an emphasis marker; Letterboxd's
+    # HTML often has one. Shift it outside rather than dropping it.
+    for marker in ("\\*\\*", "\\*"):
+        out = re.sub(
+            rf"(?<!\*){marker}(\s*)([^*\n]+?)(\s*){marker}(?!\*)",
+            lambda m, k=marker.replace("\\", ""): f"{m.group(1)}{k}{m.group(2)}{k}{m.group(3)}",
+            out,
+        )
+    # Collapse the runs of whitespace the substitutions leave behind.
+    out = re.sub(r"[ \t]{2,}", " ", out)
+    out = re.sub(r"\n{3,}", "\n\n", out)
+    return out.strip()
+
+
 def stars_to_tv(rating: float | None) -> int | None:
     """0.5-5 stars -> TV.app's 0-100 scale, twenty points a star. Exact."""
     if rating is None:
@@ -202,15 +303,22 @@ def build_index(conn: sqlite3.Connection) -> dict[str, list[dict]]:
         "FROM item WHERE media_kind = 'movie'"
     ):
         item = dict(row)
-        index.setdefault(normalize_title(item["name"]), []).append(item)
+        for key in title_keys(item["name"]):
+            index.setdefault(key, []).append(item)
     return index
 
 
 def match_entry(entry: dict, index: dict[str, list[dict]]) -> dict:
     """Decide what a Letterboxd entry corresponds to, and how sure we are."""
-    key = normalize_title(entry["title"])
     year = entry.get("year")
-    candidates = index.get(key, [])
+    key = normalize_title(entry["title"])
+    # The export's own title may carry a parenthetical as well.
+    candidates, seen = [], set()
+    for candidate_key in [key] + sorted(title_keys(entry["title"]) - {key}):
+        for item in index.get(candidate_key, []):
+            if item["id"] not in seen:
+                seen.add(item["id"])
+                candidates.append(item)
 
     if candidates:
         slack = YEAR_SLACK_UNIQUE if len(candidates) == 1 else YEAR_SLACK_AMBIGUOUS
