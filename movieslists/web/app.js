@@ -139,7 +139,8 @@ const badges = (row) => (row.sources === 'lb'
         + ` title="liked — click to unlike">\u2665</span>` : '')
   + (row.watchlisted
       ? `<span class="tag-watch" data-clearflag="watchlisted" data-key="${escapeHTML(row.key)}"`
-        + ` title="on your watchlist — click to remove">WATCH</span>` : '')
+        + ` title="${row.sources === 'lb' ? 'on your Letterboxd watchlist'
+                    : 'in your library, never played'} — click to remove">WATCH</span>` : '')
   + (row.edited ? '<span class="tag-edited">edited</span>' : '')
   + (row.reviewed ? '<span class="tag-review" title="you wrote a review">R</span>' : '');
 const editedTag = badges;

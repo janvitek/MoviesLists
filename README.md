@@ -64,6 +64,11 @@ sync cannot delete your work. Every one of the 53 fields is editable.
 
 Two fields are yours alone:
 
+A film you own but have never played is badged **WATCH**, alongside anything
+on your Letterboxd watchlist — an unplayed film in the library is a to-watch
+by any reasonable reading. It is a default rather than a fact, so clicking the
+badge clears it for that film; the override wins over both signals.
+
 - **Star ratings.** TV.app reports 0 for every item in this library, so the
   stars exist only as overrides. Click them straight from the list; clicking
   the star you are already on clears the rating.

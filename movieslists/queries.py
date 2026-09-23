@@ -199,7 +199,12 @@ def library(conn: sqlite3.Connection, art_ids: set[int] | None = None,
             "lb_rating": (f or {}).get("rating"),
             "lb_entries": lb_plays,
             "my_watches": mine.get("count") or 0,
-            "watchlisted": 1 if (f or {}).get("watchlisted_date") else 0,
+            # A film you own but have never played is a to-watch, so it is
+            # badged like one. Letterboxd's own watchlist counts too, and an
+            # override clears either, since it is applied after this.
+            "watchlisted": 1 if ((f or {}).get("watchlisted_date")
+                                 or (t is not None and played_count == 0
+                                     and not played_date)) else 0,
             "liked": 1 if (f or {}).get("liked_date") else 0,
         }
         for field, value in override.items():
@@ -400,7 +405,10 @@ def work_detail(conn: sqlite3.Connection, key: str) -> dict | None:
         ),
         "rating": int(round(film["rating"] * 20)) if film.get("rating") else 0,
         "review": next((e["review"] for e in entries if e.get("review")), None),
-        "watchlisted": 1 if film.get("watchlisted_date") else 0,
+        "watchlisted": 1 if (film.get("watchlisted_date")
+                             or (primary and not primary.get("played_count")
+                                 and not primary.get("played_date")
+                                 and not entries and not my_watches)) else 0,
         "liked": 1 if film.get("liked_date") else 0,
         "tags": next((e["tags"] for e in entries if e.get("tags")), None),
         "lb_watched_date": film.get("watched_date"),
