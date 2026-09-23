@@ -235,6 +235,10 @@ def unify_obvious(conn: sqlite3.Connection) -> int:
 
     One work known solely to TV.app, another solely to Letterboxd, the same
     title, and years close enough to be the same release recorded twice.
+
+    The Letterboxd side survives, because where the two disagree it is the one
+    that tends to be right: TV.app files Batman Returns under 1997 and
+    Byzantium under 2009.
     """
     by_title: dict[str, list[dict]] = {}
     for row in _work_rows(conn):
@@ -252,7 +256,7 @@ def unify_obvious(conn: sqlite3.Connection) -> int:
             continue
         if abs(tv[0]["year"] - lb[0]["year"]) > AUTO_YEAR_SLACK:
             continue
-        merge(conn, tv[0]["id"], lb[0]["id"], "year-drift")
+        merge(conn, lb[0]["id"], tv[0]["id"], "year-drift")
         merged += 1
     return merged
 
@@ -388,11 +392,13 @@ def answer(conn: sqlite3.Connection, question_id: str, same: bool) -> dict:
         a = conn.execute("SELECT id FROM work WHERE key = ?", (key_a,)).fetchone()
         b = conn.execute("SELECT id FROM work WHERE key = ?", (key_b,)).fetchone()
         if a and b and a[0] != b[0]:
-            # Keep whichever side TV.app knows: artwork and edits hang off it.
-            tv_first = conn.execute(
-                "SELECT 1 FROM work_source WHERE work_id = ? AND source = 'tv'",
+            # The Letterboxd record survives: where the two disagree about a
+            # year it is the likelier one. Both sources stay attached either
+            # way; this only decides whose title and year the work carries.
+            lb_first = conn.execute(
+                "SELECT 1 FROM work_source WHERE work_id = ? AND source = 'lb'",
                 (a[0],)).fetchone()
-            keep, drop = (a[0], b[0]) if tv_first else (b[0], a[0])
+            keep, drop = (a[0], b[0]) if lb_first else (b[0], a[0])
             titles = titles_for(conn, drop)
             merge(conn, keep, drop, "confirmed by hand")
             for title in titles:

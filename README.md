@@ -133,7 +133,13 @@ stay two films, as do `Damsel` 2018 and 2024.
 
 Both tables keep their source's values verbatim, exactly as `item` does for
 TV.app. Nothing is copied between them; the list joins them on read and lays
-your own edits on top. The result is one list of every film either source
+your own edits on top.
+
+Where the two disagree about a year, Letterboxd wins — it is usually the one
+that is right. TV.app files *Batman Returns* under 1997, *Byzantium* under
+2009 and *Gran Torino* under 2009; Letterboxd has 1992, 2012 and 2008. So a
+merged film keeps the Letterboxd record's title and year, and the year shown
+in the list comes from there too. Both sources stay attached either way. The result is one list of every film either source
 knows about — including the ones you have watched but do not own.
 
 One subtlety worth recording, since it is not obvious from the export: the

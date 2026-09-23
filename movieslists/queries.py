@@ -144,7 +144,10 @@ def library(conn: sqlite3.Connection, art_ids: set[int] | None = None,
         values = {
             "key": key,
             "name": (t or {}).get("name") or (f or {}).get("name") or work["title"],
-            "year": ((t or {}).get("year") or (f or {}).get("year")
+            # Letterboxd's year is preferred over TV.app's: where they differ
+            # TV.app is usually the one that is wrong, filing Batman Returns
+            # under 1997 and Byzantium under 2009.
+            "year": ((f or {}).get("year") or (t or {}).get("year")
                      or work["year"] or m.get("year")),
             "genre": (t or {}).get("genre") or _first(m.get("genres")),
             "director": (t or {}).get("director") or m.get("directors"),
@@ -346,7 +349,7 @@ def work_detail(conn: sqlite3.Connection, key: str) -> dict | None:
     film = films[0] if films else {}
     effective = {
         "name": primary.get("name") or film.get("name") or work["title"],
-        "year": (primary.get("year") or film.get("year") or work["year"]
+        "year": (film.get("year") or primary.get("year") or work["year"]
                  or tmdb.get("year")),
         "genre": primary.get("genre") or _first(tmdb.get("genres")),
         "director": primary.get("director") or tmdb.get("directors"),
