@@ -192,5 +192,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv=None) -> int:
+    # `serve` prints its import report and then blocks, so a block-buffered
+    # stdout (which is what Python gives a pipe or a log file) would withhold
+    # the report for the lifetime of the server.
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except (AttributeError, ValueError):
+        pass
     args = build_parser().parse_args(argv)
     return args.func(args)
