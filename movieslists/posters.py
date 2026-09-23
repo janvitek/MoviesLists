@@ -96,6 +96,54 @@ def parse_details(payload: dict) -> dict:
     }
 
 
+def candidates(title: str, year: int | None, key: str | None = None,
+               limit: int = 8) -> list[dict]:
+    """Search results to choose from, for logging a film nothing here has."""
+    token = api_key(key)
+    if not token:
+        raise RuntimeError("no TMDb key configured")
+    params = {"api_key": token, "query": title, "include_adult": "false"}
+    if year:
+        params["year"] = str(year)
+    try:
+        payload = json.loads(_request(f"{SEARCH_URL}?{urllib.parse.urlencode(params)}"))
+    except urllib.error.HTTPError as exc:
+        raise RuntimeError(
+            "TMDb rejected the key" if exc.code in (401, 403)
+            else f"TMDb returned HTTP {exc.code}") from exc
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"could not reach TMDb: {exc}") from exc
+
+    out = []
+    for result in payload.get("results", [])[:limit]:
+        release = result.get("release_date") or ""
+        out.append({
+            "tmdb_id": str(result.get("id")),
+            "title": result.get("title") or result.get("original_title"),
+            "original_title": result.get("original_title"),
+            "year": int(release[:4]) if release[:4].isdigit() else None,
+            "overview": (result.get("overview") or "")[:240] or None,
+            "poster_url": (f"{IMAGE_BASE}/{THUMB_SIZE}{result['poster_path']}"
+                           if result.get("poster_path") else None),
+            "vote_average": result.get("vote_average"),
+        })
+    return out
+
+
+def download_poster(database: Path, work_key: str, poster_path: str) -> bool:
+    """Fetch one poster into the cache, both sizes."""
+    full_dir, thumb_dir = poster_dirs(database)
+    full_dir.mkdir(parents=True, exist_ok=True)
+    thumb_dir.mkdir(parents=True, exist_ok=True)
+    name = f"{_safe(work_key)}.jpg"
+    try:
+        (full_dir / name).write_bytes(_request(f"{IMAGE_BASE}/{FULL_SIZE}{poster_path}"))
+        (thumb_dir / name).write_bytes(_request(f"{IMAGE_BASE}/{THUMB_SIZE}{poster_path}"))
+        return True
+    except (urllib.error.URLError, TimeoutError, OSError):
+        return False
+
+
 def poster_dirs(database: Path) -> tuple[Path, Path]:
     root = artwork.cache_dir(database) / "posters"
     return root / "full", root / "thumb"

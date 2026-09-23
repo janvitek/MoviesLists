@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import sqlite3
 
-from . import db
+from . import db, watching
 
 # An episode's `director` is really its show name, and some films are filed
 # under a literal "Unknown".
@@ -30,7 +30,7 @@ ROW_COLUMNS = [
     "key", "name", "year", "genre", "director", "media_kind",
     "show", "season_number", "episode_number",
     "played_count", "played_date", "date_added", "duration", "rating",
-    "sources", "tv_id", "lb_uri", "lb_rating", "lb_entries",
+    "sources", "tv_id", "lb_uri", "lb_rating", "lb_entries", "my_watches",
     "watchlisted", "liked", "has_art", "has_poster", "edited", "reviewed",
 ]
 
@@ -114,6 +114,7 @@ def library(conn: sqlite3.Connection, art_ids: set[int] | None = None,
     tv = _tv_side(conn)
     lb_films, lb_entries, lb_reviews = _lb_side(conn)
     tmdb = _tmdb_side(conn)
+    logged = watching.counts(conn)
     edits = db.overrides(conn)
 
     rows = []
@@ -130,15 +131,18 @@ def library(conn: sqlite3.Connection, art_ids: set[int] | None = None,
 
         # TV.app's own play count and Letterboxd's diary describe the same
         # viewing history from two sides; neither is complete, so take
-        # whichever saw more rather than adding them up.
+        # whichever saw more rather than adding them up. Viewings you logged
+        # here are ones neither noticed, so those do add.
         tv_plays = (t or {}).get("played_count") or 0
         lb_plays = (e or {}).get("n") or 0
-        played_count = max(tv_plays, lb_plays)
+        mine = logged.get(key) or {}
+        played_count = max(tv_plays, lb_plays) + (mine.get("count") or 0)
 
-        # Likewise the most recent viewing either source knows about.
+        # Likewise the most recent viewing any of them knows about.
         candidates = [d for d in ((t or {}).get("played_date"),
                                   (e or {}).get("last_watched"),
-                                  (f or {}).get("watched_date")) if d]
+                                  (f or {}).get("watched_date"),
+                                  mine.get("last")) if d]
         played_date = max(candidates) if candidates else None
 
         values = {
@@ -171,6 +175,7 @@ def library(conn: sqlite3.Connection, art_ids: set[int] | None = None,
             "lb_uri": (f or {}).get("uri"),
             "lb_rating": (f or {}).get("rating"),
             "lb_entries": lb_plays,
+            "my_watches": mine.get("count") or 0,
             "watchlisted": 1 if (f or {}).get("watchlisted_date") else 0,
             "liked": 1 if (f or {}).get("liked_date") else 0,
         }
@@ -221,7 +226,7 @@ def episodes(conn: sqlite3.Connection, art_ids: set[int] | None = None) -> list:
         values.update({
             "key": f"tv:{row['persistent_id']}", "rating": 0, "sources": "tv",
             "tv_id": row["id"], "lb_uri": None, "lb_rating": None,
-            "lb_entries": 0, "watchlisted": 0, "liked": 0,
+            "lb_entries": 0, "my_watches": 0, "watchlisted": 0, "liked": 0,
             "has_art": 1 if row["id"] in art_ids else 0, "has_poster": 0,
             "edited": 0, "reviewed": 0,
         })
@@ -301,6 +306,7 @@ def stats(conn: sqlite3.Connection) -> dict:
         "open_questions": one("SELECT COUNT(*) FROM link_decision "
                               "WHERE status = 'open'"),
         "titles": one("SELECT COUNT(*) FROM work_title"),
+        "my_watches": one("SELECT COUNT(*) FROM watch_log WHERE deleted = 0"),
         "tmdb_described": one("SELECT COUNT(*) FROM tmdb_film WHERE status = 'ok'"),
     }
 
@@ -344,6 +350,7 @@ def work_detail(conn: sqlite3.Connection, key: str) -> dict | None:
         )
     ]
     override = db.overrides_for(conn, key)
+    my_watches = watching.for_work(conn, key)
 
     primary = tv[0] if tv else {}
     film = films[0] if films else {}
@@ -357,11 +364,14 @@ def work_detail(conn: sqlite3.Connection, key: str) -> dict | None:
         "duration": (primary.get("duration")
                      or (tmdb.get("runtime") * 60 if tmdb.get("runtime") else None)),
         "long_description": primary.get("long_description") or tmdb.get("overview"),
-        "played_count": max(primary.get("played_count") or 0, len(entries)),
+        "played_count": (max(primary.get("played_count") or 0, len(entries))
+                         + len(my_watches)),
         "played_date": max(
             [d for d in (primary.get("played_date"),
                          max((e["watched_date"] for e in entries if e["watched_date"]),
-                             default=None)) if d] or [None]
+                             default=None),
+                         max((w["watched_date"] for w in my_watches), default=None))
+             if d] or [None]
         ),
         "rating": int(round(film["rating"] * 20)) if film.get("rating") else 0,
         "review": next((e["review"] for e in entries if e.get("review")), None),
@@ -381,6 +391,7 @@ def work_detail(conn: sqlite3.Connection, key: str) -> dict | None:
         "work": dict(work),
         "sources": {"tv": tv, "letterboxd": films, "tmdb": tmdb or None},
         "entries": entries,
+        "watches": my_watches,
         "lists": lists,
         "overrides": override,
         "override_sources": db.override_sources(conn, key),

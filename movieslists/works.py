@@ -191,16 +191,26 @@ def rebuild(conn: sqlite3.Connection) -> dict:
 
 
 def replay_decisions(conn: sqlite3.Connection) -> int:
-    """Re-apply the merges the user has already confirmed."""
+    """Re-apply the merges already confirmed.
+
+    Keys are stored in sorted order, which says nothing about which side is
+    which, so the surviving work is chosen the same way answering does: the
+    Letterboxd one, whose year is the likelier of the two.
+    """
     applied = 0
     for row in conn.execute(
         "SELECT key_a, key_b FROM link_decision WHERE status = 'merged'"
     ).fetchall():
         a = conn.execute("SELECT id FROM work WHERE key = ?", (row[0],)).fetchone()
         b = conn.execute("SELECT id FROM work WHERE key = ?", (row[1],)).fetchone()
-        if a and b and a[0] != b[0]:
-            merge(conn, a[0], b[0], "confirmed by hand")
-            applied += 1
+        if not (a and b) or a[0] == b[0]:
+            continue
+        lb_first = conn.execute(
+            "SELECT 1 FROM work_source WHERE work_id = ? AND source = 'lb'",
+            (a[0],)).fetchone()
+        keep, drop = (a[0], b[0]) if lb_first else (b[0], a[0])
+        merge(conn, keep, drop, "confirmed by hand")
+        applied += 1
     return applied
 
 

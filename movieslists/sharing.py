@@ -267,6 +267,51 @@ class SharedStore:
         if fields:
             self.write(persistent_id, fields)
 
+    # --- viewings ------------------------------------------------------
+    #
+    # Kept in the same per-film document as the overrides, under their own
+    # key. A viewing carries a uuid and an updated_at, so two machines that
+    # each logged one before syncing end up with both, and a deletion --
+    # which travels as a tombstone -- is not undone by the other side.
+
+    def watches(self, persistent_id: str) -> list[dict]:
+        path = self.path_for(persistent_id)
+        try:
+            return json.loads(path.read_text(encoding="utf-8")).get("watches", [])
+        except (OSError, ValueError):
+            return []
+
+    def set_watches(self, persistent_id: str, rows: list[dict]) -> None:
+        self.overrides.mkdir(parents=True, exist_ok=True)
+        path = self.path_for(persistent_id)
+        try:
+            doc = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            doc = {"persistent_id": persistent_id, "fields": {}}
+        doc["watches"] = rows
+        doc["written_at"] = now()
+        doc["device"] = device()["id"]
+        temp = path.with_suffix(".json.tmp")
+        temp.write_text(json.dumps(doc, indent=1, ensure_ascii=False),
+                        encoding="utf-8")
+        temp.replace(path)
+
+    def all_watches(self) -> dict[str, list[dict]]:
+        out: dict[str, list[dict]] = {}
+        if not self.overrides.is_dir():
+            return out
+        for path in sorted(self.overrides.glob("*.json")):
+            if _looks_conflicted(path.name):
+                continue
+            try:
+                doc = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            rows = doc.get("watches")
+            if rows:
+                out[doc.get("persistent_id") or path.stem] = rows
+        return out
+
     def conflicts(self) -> list[Path]:
         """Files a sync service left behind after a collision."""
         if not self.root.is_dir():
@@ -353,8 +398,60 @@ def reconcile(conn, store: "SharedStore") -> dict:
         else:
             counts["unchanged"] += 1
 
+    counts["watches"] = _reconcile_watches(conn, store)
     conn.commit()
     return counts
+
+
+def _reconcile_watches(conn, store: "SharedStore") -> int:
+    """Merge logged viewings, newest edit of each row winning.
+
+    Rows are identified by uuid rather than position, so two machines that
+    each logged a viewing keep both rather than one overwriting the other.
+    """
+    local = {
+        r[0]: dict(zip(
+            ("id", "work_key", "watched_date", "rating", "note", "rewatch",
+             "venue", "created_at", "updated_at", "deleted"), r))
+        for r in conn.execute(
+            "SELECT id, work_key, watched_date, rating, note, rewatch, venue, "
+            "created_at, updated_at, deleted FROM watch_log")
+    }
+    shared: dict[str, dict] = {}
+    for rows in store.all_watches().values():
+        for row in rows:
+            if row.get("id"):
+                shared[row["id"]] = row
+
+    changed = 0
+    for watch_id in set(local) | set(shared):
+        here, there = local.get(watch_id), shared.get(watch_id)
+        if there is None:
+            continue                       # ours; pushed below
+        if here is None or _as_utc(there.get("updated_at")) > _as_utc(here["updated_at"]):
+            conn.execute(
+                "INSERT INTO watch_log (id, work_key, watched_date, rating, note, "
+                "rewatch, venue, created_at, updated_at, deleted) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(id) DO UPDATE SET work_key = excluded.work_key, "
+                "watched_date = excluded.watched_date, rating = excluded.rating, "
+                "note = excluded.note, rewatch = excluded.rewatch, "
+                "venue = excluded.venue, updated_at = excluded.updated_at, "
+                "deleted = excluded.deleted",
+                (there["id"], there.get("work_key"), there.get("watched_date"),
+                 there.get("rating"), there.get("note"), there.get("rewatch", 0),
+                 there.get("venue"), there.get("created_at") or now(),
+                 there.get("updated_at") or now(), there.get("deleted", 0)))
+            changed += 1
+
+    # Push every film whose local rows differ from the shared copy.
+    by_work: dict[str, list[dict]] = {}
+    for row in local.values():
+        by_work.setdefault(row["work_key"], []).append(row)
+    for work_key, rows in by_work.items():
+        if store.watches(work_key) != rows:
+            store.set_watches(work_key, rows)
+    return changed
 
 
 def _write_local(conn, pid: str, field: str, record: dict) -> None:

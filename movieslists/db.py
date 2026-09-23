@@ -17,7 +17,7 @@ from pathlib import Path
 BUSY_TIMEOUT_MS = 15000
 
 # Bumped whenever the column set changes; a mismatch rebuilds the cache.
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 # (JSON key from extract.js, SQL column, SQL type). Order defines the table.
 COLUMNS: list[tuple[str, str, str]] = [
@@ -242,6 +242,28 @@ CREATE TABLE IF NOT EXISTS work_override (
     PRIMARY KEY (work_key, field)
 );
 
+-- Viewings you record here. TV.app keeps a count and one date, Letterboxd
+-- keeps a diary, and this is the third: the films you watched and want
+-- remembered, whether or not either of them noticed.
+--
+-- A table rather than an override, because a viewing is not a field: one film
+-- can have many, each with its own date and note. Like the other tables of
+-- your own work it is never dropped when the derived tables are rebuilt.
+CREATE TABLE IF NOT EXISTS watch_log (
+    id           TEXT PRIMARY KEY,    -- uuid: two machines can add at once
+    work_key     TEXT NOT NULL,
+    watched_date TEXT NOT NULL,       -- YYYY-MM-DD
+    rating       INTEGER,             -- 0-100, optional
+    note         TEXT,                -- optional, Markdown
+    rewatch      INTEGER NOT NULL DEFAULT 0,
+    venue        TEXT,                -- where, if you care to say
+    created_at   TEXT NOT NULL,
+    updated_at   TEXT NOT NULL,
+    deleted      INTEGER NOT NULL DEFAULT 0   -- tombstone, so a delete syncs
+);
+
+CREATE INDEX IF NOT EXISTS idx_watch_log_work ON watch_log(work_key, watched_date);
+
 -- ----------------------------------------------------------- letterboxd
 --
 -- The export, kept whole. Every column of every film-level CSV, verbatim,
@@ -439,7 +461,18 @@ def connect(path: Path) -> sqlite3.Connection:
     existing = conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='item'"
     ).fetchone()
-    if existing and version != SCHEMA_VERSION:
+    if existing and version > SCHEMA_VERSION:
+        # An older build must never touch a newer database. Left unguarded
+        # this is destructive rather than merely confusing: a server started
+        # before a schema bump sees the mismatch, takes the rebuild path, and
+        # drops the cached tables out from under the process that wrote them.
+        raise RuntimeError(
+            f"{path} was written by a newer version of MoviesLists "
+            f"(schema {version}, this build understands {SCHEMA_VERSION}). "
+            f"Restart with the current code rather than running two versions "
+            f"against one database."
+        )
+    if existing and version < SCHEMA_VERSION:
         # The column set changed; the cache is disposable, so rebuild it.
         conn.executescript(
             # Caches are rebuilt; the user's own work is not. `item` comes

@@ -37,6 +37,8 @@ OVERRIDE_ROUTE = re.compile(r"^/api/work/([^/]+)/override$")
 # share a route. "like" and "watchlist" are the names the UI uses.
 FLAG_ROUTE = re.compile(r"^/api/work/([^/]+)/(like|watchlist)$")
 FLAG_FIELDS = {"like": "liked", "watchlist": "watchlisted"}
+WATCH_ROUTE = re.compile(r"^/api/work/([^/]+)/watch$")
+WATCH_ID_ROUTE = re.compile(r"^/api/watch/([0-9a-f]{32})$")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -138,6 +140,18 @@ class Handler(BaseHTTPRequestHandler):
                     })
                 if path == "/api/artwork":
                     return self.send_json(artwork.summary(self.database))
+                if path == "/api/watches":
+                    from . import watching
+                    return self.send_json({"watches": watching.recent(conn)})
+                if path == "/api/tmdb/search":
+                    from . import posters
+                    args = parse_qs(parsed.query)
+                    query = (args.get("q") or [""])[0].strip()
+                    if not query:
+                        raise ValueError("expected a 'q' parameter")
+                    year = (args.get("year") or [None])[0]
+                    return self.send_json({"results": posters.candidates(
+                        query, int(year) if year and year.isdigit() else None)})
                 if path == "/api/questions":
                     from . import works
                     return self.send_json({"questions": works.questions(conn),
@@ -160,6 +174,51 @@ class Handler(BaseHTTPRequestHandler):
         if flag:
             from urllib.parse import unquote
             return self.set_flag(unquote(flag.group(1)), FLAG_FIELDS[flag.group(2)])
+
+        watch = WATCH_ROUTE.match(path)
+        if watch:
+            from urllib.parse import unquote
+            from . import watching
+            body = self._body()
+            conn = self._write()
+            try:
+                row = watching.log(
+                    conn, unquote(watch.group(1)),
+                    watched_date=body.get("watched_date"),
+                    rating=body.get("rating"), note=body.get("note"),
+                    rewatch=body.get("rewatch"), venue=body.get("venue"))
+                self._mirror_watch(conn, row["work_key"])
+                detail = queries.work_detail(conn, row["work_key"])
+            finally:
+                conn.close()
+            return self.send_json({"ok": True, "watch": row, "item": detail})
+
+        edit = WATCH_ID_ROUTE.match(path)
+        if edit:
+            from . import watching
+            conn = self._write()
+            try:
+                row = watching.update(conn, edit.group(1), **self._body())
+                if row is None:
+                    return self.send_json({"error": "no such viewing"}, status=404)
+                self._mirror_watch(conn, row["work_key"])
+                detail = queries.work_detail(conn, row["work_key"])
+            finally:
+                conn.close()
+            return self.send_json({"ok": True, "watch": row, "item": detail})
+
+        if path == "/api/tmdb/adopt":
+            from . import watching
+            body = self._body()
+            if not body.get("tmdb_id"):
+                raise ValueError("expected 'tmdb_id'")
+            conn = self._write()
+            try:
+                result = watching.adopt_tmdb(conn, str(body["tmdb_id"]),
+                                             database=self.database)
+            finally:
+                conn.close()
+            return self.send_json({"ok": True, **result})
 
         if path == "/api/questions/answer":
             from . import works
@@ -200,8 +259,30 @@ class Handler(BaseHTTPRequestHandler):
 
         return self.send_json({"error": "no such endpoint"}, status=404)
 
+    def _mirror_watch(self, conn, work_key: str) -> None:
+        """Push this film's viewings to the shared store, if sharing is on."""
+        if _SHARED_STORE is None:
+            return
+        from . import watching
+        _SHARED_STORE.set_watches(work_key, watching.for_work(conn, work_key))
+
     def _delete(self):
         parsed = urlparse(self.path)
+        watch = WATCH_ID_ROUTE.match(parsed.path)
+        if watch:
+            from . import watching
+            conn = self._write()
+            try:
+                row = watching.get(conn, watch.group(1))
+                if row is None:
+                    return self.send_json({"error": "no such viewing"}, status=404)
+                watching.remove(conn, watch.group(1))
+                self._mirror_watch(conn, row["work_key"])
+                detail = queries.work_detail(conn, row["work_key"])
+            finally:
+                conn.close()
+            return self.send_json({"ok": True, "item": detail})
+
         override = OVERRIDE_ROUTE.match(parsed.path)
         if not override:
             return self.send_json({"error": "no such endpoint"}, status=404)
