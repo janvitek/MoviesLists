@@ -34,6 +34,7 @@ ROW_COLUMNS = [
     "played_count", "played_date", "date_added", "duration", "rating",
     "sources", "tv_id", "lb_uri", "lb_rating", "lb_entries", "my_watches",
     "watchlisted", "liked", "has_art", "has_poster", "edited", "reviewed",
+    "deleted",
 ]
 
 # Overrides may shadow any of these in the list.
@@ -137,7 +138,8 @@ def _lb_side(conn):
 
 
 def library(conn: sqlite3.Connection, art_ids: set[int] | None = None,
-            poster_keys: set[str] | None = None) -> dict:
+            poster_keys: set[str] | None = None,
+            include_deleted: bool = False) -> dict:
     art_ids = art_ids or set()
     poster_keys = poster_keys or set()
     tv = _tv_side(conn)
@@ -147,6 +149,7 @@ def library(conn: sqlite3.Connection, art_ids: set[int] | None = None,
     edits = db.overrides(conn)
 
     rows = []
+    deleted = 0
     for work in conn.execute("SELECT key, title, year FROM work"):
         key = work["key"]
         t = tv.get(key)
@@ -224,6 +227,10 @@ def library(conn: sqlite3.Connection, art_ids: set[int] | None = None,
             if field in OVERRIDABLE_IN_LIST:
                 values[field] = value
 
+        if override.get("deleted") and not include_deleted:
+            deleted += 1
+            continue
+        values["deleted"] = 1 if override.get("deleted") else 0
         values["has_art"] = 1 if values["tv_id"] in art_ids else 0
         # Films not in TV.app have no artwork of their own; a poster stands in.
         values["has_poster"] = 1 if _safe_key(key) in poster_keys else 0
@@ -244,6 +251,7 @@ def library(conn: sqlite3.Connection, art_ids: set[int] | None = None,
         "editable_fields": db.EDITABLE_FIELDS,
         "field_types": db.field_types(),
         "genres": db.GENRES,
+        "deleted_count": deleted,
     }
 
 
@@ -270,7 +278,7 @@ def episodes(conn: sqlite3.Connection, art_ids: set[int] | None = None) -> list:
             "tv_id": row["id"], "lb_uri": None, "lb_rating": None,
             "lb_entries": 0, "my_watches": 0, "watchlisted": 0, "liked": 0,
             "has_art": 1 if row["id"] in art_ids else 0, "has_poster": 0,
-            "edited": 0, "reviewed": 0,
+            "edited": 0, "reviewed": 0, "deleted": 0,
         })
         out.append([values.get(c) for c in ROW_COLUMNS])
     return out
@@ -414,6 +422,7 @@ def work_detail(conn: sqlite3.Connection, key: str) -> dict | None:
         "liked": 1 if film.get("liked_date") else 0,
         "tags": next((e["tags"] for e in entries if e.get("tags")), None),
         "lb_watched_date": film.get("watched_date"),
+        "deleted": 0,
     }
     # An episode's director is really its show name; hide it as the list does.
     if effective["media_kind"] == "TV show" and \

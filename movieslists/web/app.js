@@ -130,7 +130,10 @@ const dash = () => '<div class="cell"><span class="dash">—</span></div>';
 const cellOrDash = (v) => (v ? `<div class="cell">${escapeHTML(v)}</div>` : dash());
 // Which sources know about this film. A film only Letterboxd knows about is
 // one you have watched but do not own, which is worth seeing at a glance.
-const badges = (row) => (row.sources === 'lb'
+const badges = (row) => (row.deleted
+    ? '<span class="tag-deleted" title="deleted — shown because you asked to see them">DELETED</span>'
+    : '')
+  + (row.sources === 'lb'
     ? '<span class="tag-lb" title="on Letterboxd; not in your TV.app library">LB</span>'
     : '')
   + (row.liked
@@ -421,7 +424,11 @@ function renderRows() {
 
 function renderCount() {
   const noun = { movies: 'film', shows: 'show' }[state.view] || 'item';
-  $('count').textContent = plural(state.visible.length, noun);
+  const hidden = state.view === 'movies' && state.deletedCount
+    ? ` <button class="linkish" id="toggleDeleted">`
+      + `${state.showDeleted ? 'hide' : `${state.deletedCount} deleted`}</button>`
+    : '';
+  $('count').innerHTML = escapeHTML(plural(state.visible.length, noun)) + hidden;
   $('reset').hidden = !(state.search || state.genre || state.decade || state.scope);
 }
 
@@ -1091,6 +1098,8 @@ function renderItemDetail() {
     + `<div class="edit-actions">`
     + `<button class="btn btn--primary" id="saveEdits" disabled>Save</button>`
     + `<button class="btn" id="revertAll"${Object.keys(over).length ? '' : ' disabled'}>Remove all edits</button>`
+    + `<button class="btn btn--quiet" id="deleteWork">`
+    + `${over.deleted ? 'Restore this film' : 'Delete this film'}</button>`
     + `</div></div>`
     + `<details class="raw"><summary>Every other field (${groups.rest.length}) — all editable</summary>`
     + `<div class="edit" style="margin-top:12px">${secondary}</div></details>`
@@ -1177,6 +1186,26 @@ async function dropWatch(id) {
   patchRow(payload.item);
   renderItemDetail();
   renderRows();
+}
+
+// Hiding rather than removing: the film comes back from its sources on every
+// import, so only a flag can outlast one. That also makes it undoable.
+async function deleteWork(key, gone) {
+  const response = await fetch(`api/work/${encodeURIComponent(key)}/delete`,
+    { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ value: gone }) });
+  if (!response.ok) return;
+  if (gone) {
+    state.items = state.items.filter((r) => r.key !== key);
+    state.byKey.delete(key);
+    state.deletedCount = (state.deletedCount || 0) + 1;
+    closeDetail();
+    render();
+  } else {
+    const payload = await response.json();
+    state.detail = payload.item;
+    renderItemDetail();
+  }
 }
 
 async function saveEdits() {
@@ -1379,6 +1408,9 @@ function wire() {
     if (flag && state.detail) {
       return void setFlag(state.byKey.get(state.detail.key), flag.dataset.flag);
     }
+    if (e.target.id === 'deleteWork' && state.detail) {
+      return void deleteWork(state.detail.key, !state.detail.overrides.deleted);
+    }
     if (e.target.id === 'logWatch' && state.detail) {
       return void logWatch(state.detail.key);
     }
@@ -1392,6 +1424,17 @@ function wire() {
   $('scrim').addEventListener('click', () => closeDetail());
   $('linksOpen').addEventListener('click', openQuestions);
   $('logFilm').addEventListener('click', openLogger);
+  $('count').addEventListener('click', async (e) => {
+    if (e.target.id !== 'toggleDeleted') return;
+    state.showDeleted = !state.showDeleted;
+    const response = await fetch(`api/library${state.showDeleted ? '?deleted=1' : ''}`);
+    if (!response.ok) return;
+    const data = await response.json();
+    state.items = unpack(data.columns, data.rows);
+    state.byKey = new Map(state.items.map((i) => [i.key, i]));
+    state.deletedCount = data.deleted_count || state.deletedCount;
+    render();
+  });
 
   $('detailBody').addEventListener('input', debounce((e) => {
     if (e.target.id !== 'findFilm') return;
@@ -1502,6 +1545,7 @@ async function boot() {
   state.editableFields = data.editable_fields || [];
   state.fieldTypes = data.field_types || {};
   state.genreVocabulary = data.genres || [];
+  state.deletedCount = data.deleted_count || 0;
 
   const s = data.stats;
   $('subtitle').textContent =

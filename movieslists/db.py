@@ -646,7 +646,11 @@ NON_EDITABLE = {"id", "persistent_id", "library_index", "position"}
 
 # Fields that exist only here: neither source has a notion of them, so they
 # live in the override store like any other edit.
-USER_FIELDS = {"review": "markdown"}
+# `deleted` hides a film without removing anything. Works are derived from
+# the sources and rebuilt on every import, so a row deleted outright would
+# simply come back; the flag is the only form a deletion can survive in. It
+# also means a deletion syncs and can be undone.
+USER_FIELDS = {"review": "markdown", "deleted": "integer"}
 
 # Fields a film gets from Letterboxd. An override shadows these exactly as it
 # shadows TV.app's, so a rating or a watchlist flag can be corrected here

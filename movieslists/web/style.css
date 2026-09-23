@@ -775,3 +775,20 @@ main {
 }
 
 .field.is-overridden .field-select { border-color: var(--edited); }
+
+.btn--quiet { margin-left: auto; color: var(--muted); }
+.btn--quiet:hover { color: var(--alert); border-color: var(--alert); }
+
+.linkish {
+  font: inherit; color: var(--accent); background: transparent; border: 0;
+  cursor: pointer; padding: 0 0 0 8px;
+}
+
+.linkish:hover { text-decoration: underline; }
+
+.tag-deleted {
+  display: inline-block; margin-left: 6px; padding: 1px 6px; border-radius: 4px;
+  background: var(--alert-bg); color: var(--alert); font-size: 10px;
+  font-weight: 650; text-transform: uppercase; letter-spacing: .04em;
+  vertical-align: 1px;
+}

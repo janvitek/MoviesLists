@@ -35,8 +35,8 @@ WORK_ROUTE = re.compile(r"^/api/work/([^/]+)$")
 OVERRIDE_ROUTE = re.compile(r"^/api/work/([^/]+)/override$")
 # Both flags come from Letterboxd and both can be overridden here, so they
 # share a route. "like" and "watchlist" are the names the UI uses.
-FLAG_ROUTE = re.compile(r"^/api/work/([^/]+)/(like|watchlist)$")
-FLAG_FIELDS = {"like": "liked", "watchlist": "watchlisted"}
+FLAG_ROUTE = re.compile(r"^/api/work/([^/]+)/(like|watchlist|delete)$")
+FLAG_FIELDS = {"like": "liked", "watchlist": "watchlisted", "delete": "deleted"}
 WATCH_ROUTE = re.compile(r"^/api/work/([^/]+)/watch$")
 WATCH_ID_ROUTE = re.compile(r"^/api/watch/([0-9a-f]{32})$")
 
@@ -121,9 +121,11 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 if path == "/api/library":
                     from . import posters
+                    args = parse_qs(parsed.query)
                     return self.send_json(queries.library(
                         conn, artwork.have(self.database),
                         posters.have(self.database),
+                        include_deleted=args.get("deleted", ["0"])[0] == "1",
                     ))
                 if path == "/api/stats":
                     return self.send_json(queries.stats(conn))

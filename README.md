@@ -257,6 +257,18 @@ recorded including the misses, so a title is searched once and not again, and
 TMDb's title and original title are fed back into the titles table — an
 original title is exactly what a later import might arrive spelling.
 
+### Deleting a film
+
+A film can be hidden with **Delete this film** in its panel. It is recorded as
+an override — `deleted` — rather than by removing anything, because works are
+derived from the sources and rebuilt on every import: a row deleted outright
+would simply come back. The flag is the only form a deletion can survive in,
+which also means it syncs between machines and can be undone.
+
+The count bar says how many are hidden and reveals them on a click, badged
+**DELETED**, with the panel then offering to restore. Nothing the sources hold
+is touched, so a restored film comes back whole.
+
 ## Logging a viewing
 
 Three sources describe a viewing and none is complete. TV.app knows it played
