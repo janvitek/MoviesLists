@@ -192,9 +192,17 @@ def wanted(conn: sqlite3.Connection, refresh: bool = False,
         "ORDER BY w.title COLLATE NOCASE"
     ).fetchall()
     out = [dict(r) for r in rows]
+
     if refresh:
-        return out
-    # A previous miss is remembered, so the same title is not searched again.
+        # Only the ones that found nothing. Re-running the whole library would
+        # be thousands of lookups to re-fetch what is already here.
+        misses = {
+            r[0] for r in conn.execute(
+                "SELECT work_key FROM tmdb_film WHERE status = 'none'")
+        }
+        return [r for r in out if r["key"] in misses]
+
+    # A previous answer is remembered, so a title is not searched twice.
     known = {
         r[0] for r in conn.execute(
             "SELECT work_key FROM tmdb_film WHERE status IN ('ok', 'none')")
@@ -208,9 +216,29 @@ def _request(url: str, timeout: float = 15.0) -> bytes:
         return response.read()
 
 
+def search_title(title: str) -> str:
+    """The title as TMDb would spell it.
+
+    Strips the trailing parenthetical a library title carries -- a repeated
+    year, or an edition note -- while leaving case and punctuation alone,
+    since TMDb is searching real titles rather than folded ones. "Mary Queen
+    of Scots (2018)" finds nothing; "Mary Queen of Scots" finds it.
+    """
+    from .letterboxd import _TRAILING_PAREN, _is_edition
+
+    text = title or ""
+    while True:
+        match = _TRAILING_PAREN.search(text)
+        if not match or not _is_edition(match.group(1)):
+            break
+        text = text[:match.start()]
+    return text.strip() or title
+
+
 def search(title: str, year: int | None, key: str) -> dict | None:
     """Best TMDb match for a title, preferring an exact year."""
-    params = {"api_key": key, "query": title, "include_adult": "false"}
+    params = {"api_key": key, "query": search_title(title),
+              "include_adult": "false"}
     if year:
         params["year"] = str(year)
     try:

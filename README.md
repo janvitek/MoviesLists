@@ -212,6 +212,11 @@ year, nothing else, and does nothing at all until a key is configured. The key
 is read from that file or `TMDB_API_KEY`, never from a command-line flag,
 since an argument ends up in shell history.
 
+TMDb is searched with the title stripped of a trailing year or edition note,
+since a library title like `Mary Queen of Scots (2018)` or `A Million Ways to
+Die In the West (Unrated)` finds nothing spelled that way. `--refresh` retries
+only the titles that previously found nothing.
+
 Director is taken from the crew credits, so a producer or screenwriter is not
 mistaken for one, and a film with two directors keeps both. Runtime arrives in
 minutes and is stored as seconds like everything else. Every lookup is
