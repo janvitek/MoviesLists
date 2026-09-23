@@ -855,22 +855,34 @@ function controlType(field) {
   return kind === 'integer' || kind === 'real' ? 'number' : 'text';
 }
 
-// Search links, built from the title alone -- no API, no lookup traffic from
-// this app; the request only happens if you click.
-function lookupLinks(eff) {
+// Direct links where an identifier is known, a search otherwise. An IMDb id
+// comes from TMDb and a Letterboxd URI from the export, so most films land on
+// the right page rather than a results list.
+function lookupLinks(eff, detail) {
   const title = eff.media_kind === 'TV show' ? (eff.show || eff.name) : eff.name;
   if (!title) return '';
+  const tmdb = (detail && detail.sources && detail.sources.tmdb) || {};
+  const film = (detail && detail.sources && (detail.sources.letterboxd || [])[0]) || {};
   const withYear = encodeURIComponent([title, eff.year].filter(Boolean).join(' '));
   const plain = encodeURIComponent(title);
-  const links = [
-    ['IMDb', `https://www.imdb.com/find/?q=${withYear}&s=tt`],
-    ['Rotten Tomatoes', `https://www.rottentomatoes.com/search?search=${plain}`],
-  ];
-  if (eff.media_kind === 'movie') {
-    links.push(['Letterboxd', `https://letterboxd.com/search/${plain}/`]);
+
+  const links = [];
+  links.push(tmdb.imdb_id
+    ? ['IMDb', `https://www.imdb.com/title/${encodeURIComponent(tmdb.imdb_id)}/`, true]
+    : ['IMDb', `https://www.imdb.com/find/?q=${withYear}&s=tt`, false]);
+  links.push(film.uri
+    ? ['Letterboxd', film.uri, true]
+    : ['Letterboxd', `https://letterboxd.com/search/${plain}/`, false]);
+  if (tmdb.tmdb_id) {
+    links.push(['TMDb', `https://www.themoviedb.org/movie/${encodeURIComponent(tmdb.tmdb_id)}`, true]);
   }
-  return `<div class="lookup">${links.map(([name, href]) =>
-    `<a href="${href}" target="_blank" rel="noopener noreferrer">${name} \u2197</a>`).join('')}</div>`;
+  links.push(['Rotten Tomatoes',
+              `https://www.rottentomatoes.com/search?search=${plain}`, false]);
+
+  return `<div class="lookup">${links.map(([name, href, direct]) =>
+    `<a href="${escapeHTML(href)}" target="_blank" rel="noopener noreferrer"`
+    + `${direct ? '' : ' class="is-search" title="a search, since no id is known"'}`
+    + `>${name} \u2197</a>`).join('')}</div>`;
 }
 
 // Watchlist and liked come from Letterboxd but are yours to change; an edit
@@ -1119,7 +1131,7 @@ function renderItemDetail() {
     + starPicker(eff.rating)
     + flagToggles(eff)
     + sourceSummary(d)
-    + lookupLinks(eff)
+    + lookupLinks(eff, d)
     + lists
     + (eff.long_description ? `<p class="blurb">${escapeHTML(eff.long_description)}</p>` : '')
     + viewingHistory(d)

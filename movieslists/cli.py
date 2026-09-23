@@ -70,6 +70,36 @@ def cmd_sync(args) -> int:
     return 0
 
 
+def _top_up_tmdb(database: Path, args, limit: int = 60) -> None:
+    """Fetch TMDb records for films that have none yet.
+
+    Bounded, because this runs at startup and a first run over a whole library
+    is thousands of lookups: it catches up a little each time rather than
+    holding the app shut. Silent when there is no key, since TMDb is optional.
+    """
+    from . import db, posters
+
+    if not posters.api_key():
+        return
+    conn = db.connect(database)
+    try:
+        pending = len(posters.wanted(conn))
+    finally:
+        conn.close()
+    if not pending:
+        return
+
+    print(f"looking up {min(pending, limit)} of {pending} films at TMDb ...")
+    try:
+        result = posters.fetch(database, limit=limit)
+    except RuntimeError as exc:
+        print(f"warning: TMDb lookup skipped: {exc}", file=sys.stderr)
+        return
+    left = result["remaining"]
+    print(f"described {result['found']}, {result['missing']} not found"
+          + (f"; {left} still to do — run 'movieslists tmdb' to finish" if left else ""))
+
+
 def report_changes(result: dict) -> None:
     """Say what moved since the last import, loudly if something vanished."""
     if result.get("first_import"):
@@ -150,6 +180,9 @@ def cmd_serve(args) -> int:
         print(f"error: no library cache at {database}\nrun 'movieslists sync' first.",
               file=sys.stderr)
         return 1
+
+    if not args.no_tmdb:
+        _top_up_tmdb(database, args)
 
     if store is not None:
         server.attach_sharing(store, getattr(args, "shared_dir", None))
@@ -493,7 +526,7 @@ def cmd_tmdb(args) -> int:
     try:
         result = posters.fetch(database, limit=args.limit, refresh=args.refresh,
                                with_posters=not args.no_posters,
-                               include_gaps=args.include_gaps,
+                               scope=args.scope,
                                progress=progress)
     except RuntimeError as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -535,6 +568,8 @@ def build_parser() -> argparse.ArgumentParser:
                        help="skip the import and serve the existing cache")
     serve.add_argument("--no-snapshot", action="store_true",
                        help="do not snapshot before starting")
+    serve.add_argument("--no-tmdb", action="store_true",
+                       help="do not look anything up at TMDb on startup")
     serve.set_defaults(func=cmd_serve)
 
     stats = sub.add_parser("stats", help="print a summary of the cache")
@@ -605,9 +640,12 @@ def build_parser() -> argparse.ArgumentParser:
                     help="look up titles that previously found nothing")
     tm.add_argument("--no-posters", action="store_true",
                     help="fetch the metadata but not the images")
-    tm.add_argument("--include-gaps", action="store_true",
-                    help="also look up films TV.app has but left without a "
-                         "director")
+    tm.add_argument("--scope", choices=["missing", "gaps", "all"],
+                    default="all",
+                    help="'all': every film (default), which gives the whole "
+                         "library an IMDb id; 'missing': only films TV.app "
+                         "does not have; 'gaps': those plus films TV.app left "
+                         "without a director")
     tm.add_argument("--status", action="store_true", help="report what is cached")
     tm.set_defaults(func=cmd_tmdb)
 

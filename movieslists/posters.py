@@ -160,28 +160,35 @@ def have(database: Path) -> set[str]:
     return {p.stem for p in full.glob("*.jpg") if p.stat().st_size > 0}
 
 
-def wanted(conn: sqlite3.Connection, refresh: bool = False,
-           include_gaps: bool = False) -> list[dict]:
-    """Films TMDb could usefully describe.
+NO_TV = ("NOT EXISTS (SELECT 1 FROM work_source s "
+         "            WHERE s.work_id = w.id AND s.source = 'tv')")
 
-    By default the ones TV.app does not have, which arrive with nothing but a
-    title and a year. With `include_gaps`, also the ones TV.app does have but
-    left without a director -- it files fifty of them under "Unknown".
-    """
-    clause = (
-        "NOT EXISTS (SELECT 1 FROM work_source s "
-        "            WHERE s.work_id = w.id AND s.source = 'tv')"
-    )
-    if include_gaps:
-        clause += (
-            " OR EXISTS (SELECT 1 FROM work_source s JOIN item i "
-            "            ON i.persistent_id = s.source_id "
-            "            WHERE s.work_id = w.id AND s.source = 'tv' "
-            "            AND (i.director IS NULL OR i.director = '' "
-            "                 OR lower(i.director) IN ('unknown', 'n/a')))"
-        )
+NO_DIRECTOR = (
+    "EXISTS (SELECT 1 FROM work_source s JOIN item i "
+    "        ON i.persistent_id = s.source_id "
+    "        WHERE s.work_id = w.id AND s.source = 'tv' "
+    "        AND (i.director IS NULL OR i.director = '' "
+    "             OR lower(i.director) IN ('unknown', 'n/a')))"
+)
+
+SCOPES = {
+    # The films that arrive with nothing but a title and a year.
+    "missing": NO_TV,
+    # Plus the ones TV.app has but filed without a director.
+    "gaps": f"({NO_TV}) OR ({NO_DIRECTOR})",
+    # Everything, which is what gives the library an IMDb id throughout --
+    # the stable identifier neither source provides.
+    "all": "1 = 1",
+}
+
+
+def wanted(conn: sqlite3.Connection, refresh: bool = False,
+           scope: str = "all") -> list[dict]:
+    """Films TMDb could usefully describe."""
+    if scope not in SCOPES:
+        raise ValueError(f"unknown scope {scope!r}; expected one of {sorted(SCOPES)}")
     rows = conn.execute(
-        f"SELECT w.key, w.title, w.year FROM work w WHERE {clause} "
+        f"SELECT w.key, w.title, w.year FROM work w WHERE {SCOPES[scope]} "
         "ORDER BY w.title COLLATE NOCASE"
     ).fetchall()
     out = [dict(r) for r in rows]
@@ -229,7 +236,7 @@ def search(title: str, year: int | None, key: str) -> dict | None:
 
 def fetch(database: Path, limit: int | None = None, refresh: bool = False,
           key: str | None = None, with_posters: bool = True,
-          include_gaps: bool = False, progress=None) -> dict:
+          scope: str = "all", progress=None) -> dict:
     """Look up the films TV.app does not have, and keep what TMDb says."""
     token = api_key(key)
     if not token:
@@ -242,7 +249,14 @@ def fetch(database: Path, limit: int | None = None, refresh: bool = False,
 
     conn = db.connect(database)
     try:
-        targets = wanted(conn, refresh, include_gaps)
+        targets = wanted(conn, refresh, scope)
+        # A film already in TV.app has artwork, and the list shows that in
+        # preference to a poster, so fetching one would be bytes nobody sees.
+        has_artwork = {
+            r[0] for r in conn.execute(
+                "SELECT w.key FROM work w JOIN work_source s "
+                "ON s.work_id = w.id AND s.source = 'tv'")
+        }
         if limit is not None:
             targets = targets[:limit]
         full_dir, thumb_dir = poster_dirs(database)
@@ -271,7 +285,8 @@ def fetch(database: Path, limit: int | None = None, refresh: bool = False,
                 if record.get("directors"):
                     counts["directors"] += 1
                 _record(conn, row, record, "ok", None)
-                if with_posters and record.get("poster_path"):
+                if (with_posters and record.get("poster_path")
+                        and row["key"] not in has_artwork):
                     name = f"{_safe(row['key'])}.jpg"
                     try:
                         (full_dir / name).write_bytes(
@@ -288,7 +303,7 @@ def fetch(database: Path, limit: int | None = None, refresh: bool = False,
             time.sleep(PAUSE_SECONDS)
         conn.commit()
         record_titles(conn)
-        counts["remaining"] = len(wanted(conn, include_gaps=include_gaps))
+        counts["remaining"] = len(wanted(conn, scope=scope))
         return counts
     finally:
         conn.close()

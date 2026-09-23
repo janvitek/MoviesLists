@@ -189,9 +189,23 @@ film's own sources always win; TMDb only supplies what they left blank.
 echo YOUR_KEY > ~/.config/movieslists/tmdb.key
 
 movieslists tmdb --status
-movieslists tmdb                  # the films TV.app does not have
-movieslists tmdb --include-gaps   # and the ones it files under "Unknown"
+movieslists tmdb                     # every film (the default)
+movieslists tmdb --scope missing     # only the ones TV.app does not have
 ```
+
+Every film is looked up, not only the bare ones, because TMDb is the single
+source that returns a **stable external identifier**. The whole matching
+apparatus — derived keys, the titles table, the questions — exists precisely
+because TV.app and Letterboxd share none. With an `imdb_id` and a `tmdb_id`
+on everything, the IMDb, Letterboxd and TMDb links in the detail panel go
+straight to the film instead of to a search, and a future import has
+something better than a title and a year to match on.
+
+`serve` tops up on startup, sixty films at a time, so anything newly bought or
+newly logged gets a record without being asked for. `--no-tmdb` skips it.
+
+Artwork stays TV.app's wherever it exists — it is generally the better image,
+and a poster is only fetched for films TV.app does not have.
 
 This is the only part of the app that uses the network. It sends a title and a
 year, nothing else, and does nothing at all until a key is configured. The key
