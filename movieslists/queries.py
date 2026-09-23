@@ -89,7 +89,9 @@ def _tmdb_side(conn):
         for row in conn.execute(
             "SELECT work_key, tmdb_id, imdb_id, title, original_title, year, "
             "       runtime, overview, genres, directors, cast_list, "
-            "       poster_path, vote_average FROM tmdb_film WHERE status = 'ok'"
+            "       poster_path, vote_average, media_type, series_name, "
+            "       series_year FROM tmdb_film "
+            "WHERE status = 'ok' OR media_type = 'tv'"
         )
     }
 
@@ -150,6 +152,7 @@ def library(conn: sqlite3.Connection, art_ids: set[int] | None = None,
 
     rows = []
     deleted = 0
+    television = []
     for work in conn.execute("SELECT key, title, year FROM work"):
         key = work["key"]
         t = tv.get(key)
@@ -230,6 +233,16 @@ def library(conn: sqlite3.Connection, art_ids: set[int] | None = None,
         if override.get("deleted") and not include_deleted:
             deleted += 1
             continue
+
+        # Letterboxd is a film diary, but television gets logged in it too,
+        # arriving as a film with no director. TMDb's series index identifies
+        # those; they belong under Shows, not here. An override wins, so a
+        # wrong call is one edit away from fixed.
+        kind = override.get("media_kind") or (
+            "TV show" if m.get("media_type") == "tv" else None)
+        if kind == "TV show":
+            television.append((key, values, m))
+            continue
         values["deleted"] = 1 if override.get("deleted") else 0
         values["has_art"] = 1 if values["tv_id"] in art_ids else 0
         # Films not in TV.app have no artwork of their own; a poster stands in.
@@ -243,7 +256,7 @@ def library(conn: sqlite3.Connection, art_ids: set[int] | None = None,
     return {
         "columns": ROW_COLUMNS,
         "rows": rows,
-        "episodes": episodes(conn, art_ids),
+        "episodes": episodes(conn, art_ids, poster_keys),
         "facets": facets(conn),
         "stats": stats(conn),
         "sync": last_sync(conn),
@@ -252,6 +265,7 @@ def library(conn: sqlite3.Connection, art_ids: set[int] | None = None,
         "field_types": db.field_types(),
         "genres": db.GENRES,
         "deleted_count": deleted,
+        "television_count": len(television),
     }
 
 
@@ -259,8 +273,13 @@ def _safe_key(work_key: str) -> str:
     return "".join(c if c.isalnum() or c in "-_" else "_" for c in work_key)[:180]
 
 
-def episodes(conn: sqlite3.Connection, art_ids: set[int] | None = None) -> list:
-    """TV episodes, which have no Letterboxd counterpart and no work."""
+def episodes(conn: sqlite3.Connection, art_ids: set[int] | None = None,
+             poster_keys: set[str] | None = None) -> list:
+    """TV episodes: TV.app's own, plus the television logged on Letterboxd.
+
+    The latter arrive as works rather than items, so they are shaped like an
+    episode of their series here -- which is all the Shows view needs.
+    """
     art_ids = art_ids or set()
     out = []
     for row in conn.execute(
@@ -280,6 +299,48 @@ def episodes(conn: sqlite3.Connection, art_ids: set[int] | None = None) -> list:
             "has_art": 1 if row["id"] in art_ids else 0, "has_poster": 0,
             "edited": 0, "reviewed": 0, "deleted": 0,
         })
+        out.append([values.get(c) for c in ROW_COLUMNS])
+
+    poster_keys = poster_keys or set()
+    edits = db.overrides(conn)
+    logged = watching.counts(conn)
+    for row in conn.execute(
+        "SELECT w.key, w.title, w.year, t.series_name, t.series_year, t.genres, "
+        "       t.overview, f.rating, f.watchlisted_date, f.liked_date "
+        "FROM work w JOIN tmdb_film t ON t.work_key = w.key "
+        "LEFT JOIN work_source s ON s.work_id = w.id AND s.source = 'lb' "
+        "LEFT JOIN lb_film f ON f.uri = s.source_id "
+        "WHERE t.media_type = 'tv'"
+    ):
+        override = edits.get(row["key"]) or {}
+        if override.get("deleted") or override.get("media_kind") == "movie":
+            continue
+        entries = conn.execute(
+            "SELECT COUNT(*) n, MAX(watched_date) last FROM lb_entry "
+            "WHERE work_key = ?", (row["key"],)).fetchone()
+        mine = logged.get(row["key"]) or {}
+        values = {
+            "key": row["key"], "name": row["title"], "year": row["year"],
+            "genre": _first_genre(row["genres"]),
+            "director": None, "media_kind": "TV show",
+            "show": row["series_name"] or row["title"],
+            "season_number": None, "episode_number": None,
+            "played_count": (entries["n"] or 0) + (mine.get("count") or 0),
+            "played_date": max([d for d in (entries["last"], mine.get("last")) if d]
+                               or [None]),
+            "date_added": None, "duration": None,
+            "rating": int(round(row["rating"] * 20)) if row["rating"] else 0,
+            "sources": "lb", "tv_id": None, "lb_uri": None, "lb_rating": row["rating"],
+            "lb_entries": entries["n"] or 0, "my_watches": mine.get("count") or 0,
+            "watchlisted": 1 if row["watchlisted_date"] else 0,
+            "liked": 1 if row["liked_date"] else 0,
+            "has_art": 0,
+            "has_poster": 1 if _safe_key(row["key"]) in poster_keys else 0,
+            "edited": 1 if override else 0, "reviewed": 0, "deleted": 0,
+        }
+        for field, value in override.items():
+            if field in OVERRIDABLE_IN_LIST:
+                values[field] = value
         out.append([values.get(c) for c in ROW_COLUMNS])
     return out
 

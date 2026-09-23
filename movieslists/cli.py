@@ -543,6 +543,21 @@ def cmd_tmdb(args) -> int:
                   f"then: echo YOUR_KEY > {posters.KEY_FILE}")
         return 0
 
+    if args.television:
+        def tv_progress(done, total, counts):
+            print(f"  {done}/{total}  television {counts['television']}, "
+                  f"unidentified {counts['still_unknown']}")
+
+        try:
+            found = posters.classify_television(database, progress=tv_progress)
+        except RuntimeError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        print(f"checked {found['checked']} entries with no film match: "
+              f"{found['television']} are television, "
+              f"{found['still_unknown']} still unidentified")
+        return 0
+
     def progress(done, total, counts):
         print(f"  {done}/{total}  described {counts['found']} "
               f"({counts['directors']} with a director), "
@@ -552,8 +567,7 @@ def cmd_tmdb(args) -> int:
     try:
         result = posters.fetch(database, limit=args.limit, refresh=args.refresh,
                                with_posters=not args.no_posters,
-                               scope=args.scope,
-                               progress=progress)
+                               scope=args.scope, progress=progress)
     except RuntimeError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -562,7 +576,6 @@ def cmd_tmdb(args) -> int:
           f"{result['posters']} posters, {result['missing']} not found, "
           f"{result['errors']} errors; {result['remaining']} still to do")
     return 0
-
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -672,6 +685,9 @@ def build_parser() -> argparse.ArgumentParser:
                          "library an IMDb id; 'missing': only films TV.app "
                          "does not have; 'gaps': those plus films TV.app left "
                          "without a director")
+    tm.add_argument("--television", action="store_true",
+                    help="identify entries that are television rather than "
+                         "film, by asking TMDb's series index")
     tm.add_argument("--status", action="store_true", help="report what is cached")
     tm.set_defaults(func=cmd_tmdb)
 

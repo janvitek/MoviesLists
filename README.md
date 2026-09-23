@@ -257,6 +257,22 @@ recorded including the misses, so a title is searched once and not again, and
 TMDb's title and original title are fed back into the titles table — an
 original title is exactly what a later import might arrive spelling.
 
+### Television logged as film
+
+Letterboxd is a film diary, but television gets logged in it anyway, and those
+entries arrive here looking like films with no director. `movieslists tmdb
+--television` asks TMDb's series index about them and files the answers.
+
+Two kinds are checked: entries with no film match at all, and entries that
+matched a film with nobody credited as director. The second is the telling
+case — every real film has a director, so a match without one is usually a
+series that shares a title with something. `Squid Game` had matched "Squid
+Game: Making Season 2", `Band of Brothers` "The Making of 'Band of Brothers'".
+
+An identified entry moves out of the film list and joins its series under
+Shows, merging with any episodes TV.app has of the same show. `media_kind` is
+an ordinary override, so a wrong call is one edit away from corrected.
+
 ### Deleting a film
 
 A film can be hidden with **Delete this film** in its panel. It is recorded as

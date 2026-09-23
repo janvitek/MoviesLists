@@ -26,6 +26,7 @@ from pathlib import Path
 from . import artwork, db, sharing
 
 SEARCH_URL = "https://api.themoviedb.org/3/search/movie"
+TV_SEARCH_URL = "https://api.themoviedb.org/3/search/tv"
 DETAIL_URL = "https://api.themoviedb.org/3/movie"
 IMAGE_BASE = "https://image.tmdb.org/t/p"
 FULL_SIZE, THUMB_SIZE = "w500", "w185"
@@ -128,6 +129,104 @@ def candidates(title: str, year: int | None, key: str | None = None,
             "vote_average": result.get("vote_average"),
         })
     return out
+
+
+def search_tv(title: str, key: str) -> dict | None:
+    """Best TMDb *series* match, for a title that is no film.
+
+    Letterboxd is a film diary, but people log television in it anyway, and it
+    arrives here looking like a film with no director. Names an episode
+    "Show: Episode", so the part before a colon is tried when the whole is
+    not found.
+    """
+    attempts = [search_title(title)]
+    if ":" in title:
+        head = title.split(":", 1)[0].strip()
+        if len(head) > 2:
+            attempts.append(head)
+
+    for query in attempts:
+        params = urllib.parse.urlencode({"api_key": key, "query": query})
+        try:
+            results = json.loads(_request(f"{TV_SEARCH_URL}?{params}")).get("results", [])
+        except urllib.error.HTTPError as exc:
+            raise RuntimeError(
+                "TMDb rejected the key" if exc.code in (401, 403)
+                else f"TMDb returned HTTP {exc.code}") from exc
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"could not reach TMDb: {exc}") from exc
+        if results:
+            first = results[0]
+            aired = first.get("first_air_date") or ""
+            return {
+                "series_id": str(first.get("id")),
+                "series_name": first.get("name") or first.get("original_name"),
+                "series_year": int(aired[:4]) if aired[:4].isdigit() else None,
+                "overview": first.get("overview") or None,
+                "poster_path": first.get("poster_path") or None,
+            }
+    return None
+
+
+def classify_television(database: Path, key: str | None = None,
+                        limit: int | None = None, progress=None) -> dict:
+    """Find the entries that are television rather than film.
+
+    Only the ones with no film match are asked about: a title that matched a
+    film is a film.
+    """
+    token = api_key(key)
+    if not token:
+        raise RuntimeError("no TMDb key configured")
+
+    conn = db.connect(database)
+    try:
+        # Entries with no film match, and entries that matched a film with
+        # nobody credited as director. The second is the telling case: every
+        # real film has a director, so a match without one is usually a
+        # series that happened to share a title with something.
+        rows = conn.execute(
+            "SELECT work_key, searched_title, searched_year FROM tmdb_film "
+            "WHERE (media_type IS NULL OR media_type = 'movie') "
+            "  AND (status = 'none' OR directors IS NULL OR directors = '') "
+            "ORDER BY searched_title"
+        ).fetchall()
+        if limit is not None:
+            rows = rows[:limit]
+
+        counts = {"checked": 0, "television": 0, "still_unknown": 0}
+        for n, row in enumerate(rows, start=1):
+            counts["checked"] += 1
+            try:
+                found = search_tv(row["searched_title"], token)
+            except RuntimeError:
+                continue
+            if found:
+                counts["television"] += 1
+                conn.execute(
+                    "UPDATE tmdb_film SET media_type = 'tv', series_id = ?, "
+                    "series_name = ?, series_year = ?, overview = "
+                    "COALESCE(overview, ?), poster_path = COALESCE(poster_path, ?), "
+                    "fetched_at = ? WHERE work_key = ?",
+                    (found["series_id"], found["series_name"], found["series_year"],
+                     found["overview"], found["poster_path"], db._now_iso(),
+                     row["work_key"]))
+                if found["poster_path"]:
+                    download_poster(database, row["work_key"], found["poster_path"])
+            else:
+                counts["still_unknown"] += 1
+                conn.execute(
+                    "UPDATE tmdb_film SET media_type = 'unknown' WHERE work_key = ?",
+                    (row["work_key"],))
+            if n % 20 == 0:
+                conn.commit()
+                if progress:
+                    progress(n, len(rows), counts)
+            time.sleep(PAUSE_SECONDS)
+        conn.commit()
+        return counts
+    finally:
+        conn.close()
 
 
 def download_poster(database: Path, work_key: str, poster_path: str) -> bool:
@@ -313,6 +412,9 @@ def fetch(database: Path, limit: int | None = None, refresh: bool = False,
                 if record.get("directors"):
                     counts["directors"] += 1
                 _record(conn, row, record, "ok", None)
+                conn.execute(
+                    "UPDATE tmdb_film SET media_type = 'movie' WHERE work_key = ?",
+                    (row["key"],))
                 if (with_posters and record.get("poster_path")
                         and row["key"] not in has_artwork):
                     name = f"{_safe(row['key'])}.jpg"

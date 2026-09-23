@@ -17,7 +17,7 @@ from pathlib import Path
 BUSY_TIMEOUT_MS = 15000
 
 # Bumped whenever the column set changes; a mismatch rebuilds the cache.
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 # (JSON key from extract.js, SQL column, SQL type). Order defines the table.
 COLUMNS: list[tuple[str, str, str]] = [
@@ -369,6 +369,10 @@ CREATE TABLE IF NOT EXISTS tmdb_film (
     vote_count     INTEGER,
     searched_title TEXT,               -- what we asked for
     searched_year  INTEGER,
+    media_type     TEXT,               -- movie | tv
+    series_id      TEXT,               -- TMDb series, when this is television
+    series_name    TEXT,
+    series_year    INTEGER,
     status         TEXT NOT NULL,      -- ok | none | error
     detail         TEXT,
     fetched_at     TEXT NOT NULL
@@ -503,14 +507,31 @@ def connect(path: Path) -> sqlite3.Connection:
     return conn
 
 
+# Columns added to tables that outlive a rebuild. CREATE TABLE IF NOT EXISTS
+# will not widen an existing table, so they are added explicitly.
+_ADDED_COLUMNS = {
+    "item_override": [("source", "TEXT NOT NULL DEFAULT 'manual'")],
+    "tmdb_film": [
+        ("media_type", "TEXT"),
+        ("series_id", "TEXT"),
+        ("series_name", "TEXT"),
+        ("series_year", "INTEGER"),
+    ],
+}
+
+
 def _add_missing_columns(conn: sqlite3.Connection) -> None:
-    """Widen user-data tables in place rather than rebuilding them."""
-    have = {r[1] for r in conn.execute("PRAGMA table_info(item_override)")}
-    if "source" not in have:
-        conn.execute(
-            "ALTER TABLE item_override ADD COLUMN source TEXT NOT NULL "
-            "DEFAULT 'manual'"
-        )
+    """Widen tables in place rather than rebuilding them."""
+    for table, columns in _ADDED_COLUMNS.items():
+        exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+        ).fetchone()
+        if not exists:
+            continue
+        have = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+        for name, declaration in columns:
+            if name not in have:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {declaration}")
 
 
 # Fields that churn on their own and would bury real changes: playback
