@@ -70,6 +70,32 @@ def cmd_sync(args) -> int:
     return 0
 
 
+def _relink(database: Path) -> None:
+    """Rebuild the work graph after an import.
+
+    Without this a film bought since the last run never becomes a work: it
+    would sit in `item` unseen by the list, unlinked from its Letterboxd
+    record, and unable to carry a rating or a viewing. Takes about a second.
+    """
+    import sqlite3
+
+    from . import db, works
+
+    conn = db.connect(database)
+    conn.row_factory = sqlite3.Row
+    try:
+        counts = works.rebuild(conn)
+    finally:
+        conn.close()
+    noted = []
+    if counts.get("merged"):
+        noted.append(f"{counts['merged']} joined across sources")
+    if counts.get("questions"):
+        noted.append(f"{counts['questions']} to confirm")
+    if noted:
+        print("linked: " + ", ".join(noted))
+
+
 def _top_up_tmdb(database: Path, args, limit: int = 60) -> None:
     """Fetch TMDb records for films that have none yet.
 
