@@ -879,6 +879,19 @@ function sourceSummary(detail) {
     parts.push(`<div class="src src--lb"><span class="src-name">Letterboxd</span>`
       + `<span class="src-detail">${escapeHTML(bits.join(' \u00b7 ')) || 'listed'}${href}</span></div>`);
   }
+  const tmdb = detail.sources.tmdb;
+  if (tmdb) {
+    const bits = [];
+    if (tmdb.directors) bits.push(escapeHTML(tmdb.directors));
+    if (tmdb.genres) bits.push(escapeHTML(tmdb.genres));
+    if (tmdb.runtime) bits.push(`${tmdb.runtime}m`);
+    if (tmdb.vote_average) bits.push(`${tmdb.vote_average}/10`);
+    const href = tmdb.tmdb_id
+      ? ` <a href="https://www.themoviedb.org/movie/${encodeURIComponent(tmdb.tmdb_id)}"`
+        + ` target="_blank" rel="noopener noreferrer">open \u2197</a>` : '';
+    parts.push(`<div class="src src--tmdb"><span class="src-name">TMDb</span>`
+      + `<span class="src-detail">${bits.join(' \u00b7 ') || 'matched'}${href}</span></div>`);
+  }
   if (!parts.length) return '';
   return `<div class="sources">${parts.join('')}</div>`;
 }
@@ -928,10 +941,15 @@ function renderItemDetail() {
   const tv = (d.sources.tv || [])[0] || {};
   const film = (d.sources.letterboxd || [])[0] || {};
 
-  // What each source says, before any edit -- the baseline a revert returns to.
+  // What the sources say, before any edit -- the baseline a revert returns to.
+  const tmdb = d.sources.tmdb || {};
   const fromSource = {
+    ...tmdb,
     ...tv,
-    year: tv.year || film.year,
+    genre: tv.genre || (tmdb.genres || '').split(', ')[0] || null,
+    director: tv.director || tmdb.directors || null,
+    long_description: tv.long_description || tmdb.overview || null,
+    year: tv.year || film.year || tmdb.year,
     rating: film.rating != null ? Math.round(film.rating * 20) : 0,
     review: (d.entries || []).map((e) => e.review).find(Boolean) || null,
   };

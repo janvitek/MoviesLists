@@ -667,3 +667,5 @@ main {
    height and let the narrower image sit centred in the same cell. */
 .art--poster { width: 28px; height: 41px; object-fit: cover; margin: 0 22px; }
 .hero--poster { aspect-ratio: auto; max-height: 340px; object-fit: contain; background: #0d0d0f; }
+
+.src--tmdb { border-left-color: #8f7ad6; }

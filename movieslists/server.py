@@ -48,6 +48,7 @@ class Handler(BaseHTTPRequestHandler):
     def _read(self) -> sqlite3.Connection:
         conn = sqlite3.connect(f"file:{self.database}?mode=ro", uri=True)
         conn.row_factory = sqlite3.Row
+        conn.execute(f"PRAGMA busy_timeout = {db.BUSY_TIMEOUT_MS}")
         return conn
 
     def _write(self) -> sqlite3.Connection:

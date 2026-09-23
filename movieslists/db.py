@@ -13,6 +13,9 @@ import re
 import sqlite3
 from pathlib import Path
 
+# How long to wait for another process to finish writing before giving up.
+BUSY_TIMEOUT_MS = 15000
+
 # Bumped whenever the column set changes; a mismatch rebuilds the cache.
 SCHEMA_VERSION = 10
 
@@ -427,6 +430,10 @@ def connect(path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    # More than one process uses this file: the server while a long import or
+    # a TMDb run is going. Without a timeout the loser fails immediately
+    # rather than waiting the moment or two the writer actually needs.
+    conn.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
 
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     existing = conn.execute(

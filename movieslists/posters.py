@@ -35,6 +35,11 @@ USER_AGENT = "MoviesLists/0.1 (personal library tool)"
 # TMDb allows far more than this; the pause is politeness, not a limit.
 PAUSE_SECONDS = 0.06
 
+# Commit this often. A full run is thousands of lookups over many minutes, and
+# holding them all in one transaction would mean an interruption threw away
+# every answer already paid for.
+COMMIT_EVERY = 25
+
 
 def api_key(explicit: str | None = None) -> str | None:
     """The TMDb key, from the argument, the environment, or a file.
@@ -228,8 +233,10 @@ def fetch(database: Path, limit: int | None = None, refresh: bool = False,
                         counts["posters"] += 1
                     except (urllib.error.URLError, TimeoutError, OSError):
                         counts["errors"] += 1
-            if progress and n % 25 == 0:
-                progress(n, len(targets), counts)
+            if n % COMMIT_EVERY == 0:
+                conn.commit()
+                if progress:
+                    progress(n, len(targets), counts)
             time.sleep(PAUSE_SECONDS)
         conn.commit()
         record_titles(conn)
