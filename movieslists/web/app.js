@@ -129,7 +129,7 @@ const cellOrDash = (v) => (v ? `<div class="cell">${escapeHTML(v)}</div>` : dash
 const badges = (row) => (row.sources === 'lb'
     ? '<span class="tag-lb" title="on Letterboxd; not in your TV.app library">LB</span>'
     : '')
-  + (row.watchlisted ? '<span class="tag-watch" title="on your watchlist">watchlist</span>' : '')
+  + (row.watchlisted ? '<span class="tag-watch" title="on your watchlist">WATCH</span>' : '')
   + (row.edited ? '<span class="tag-edited">edited</span>' : '')
   + (row.reviewed ? '<span class="tag-review" title="you wrote a review">R</span>' : '');
 const editedTag = badges;
