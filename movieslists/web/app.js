@@ -552,23 +552,34 @@ function renderQuestionBanner() {
 }
 
 function sideCard(side, label) {
+  // The director is what usually settles these, so it leads. A Letterboxd
+  // export has none, so that side's comes from TMDb.
+  const t = side.tmdb || {};
+  const director = (side.tv && side.tv.director) || t.directors || null;
+  const genre = (side.tv && side.tv.genre) || t.genres || null;
+  // Both sides through the same formatter: comparing "1h 40m" against "99m"
+  // is exactly the sort of thing these questions turn on.
+  const runtime = (side.tv && side.tv.duration)
+    ? duration(side.tv.duration)
+    : (t.runtime ? duration(t.runtime * 60) : null);
+
   const bits = [];
-  if (side.tv) {
-    if (side.tv.genre) bits.push(escapeHTML(side.tv.genre));
-    if (side.tv.director) bits.push(escapeHTML(side.tv.director));
-    if (side.tv.duration) bits.push(duration(side.tv.duration));
-    if (side.tv.played_count) bits.push(plural(side.tv.played_count, 'play'));
-  }
+  if (director) bits.push(`<strong>${escapeHTML(director)}</strong>`);
+  if (genre) bits.push(escapeHTML(genre));
+  if (runtime) bits.push(escapeHTML(runtime));
+  if (side.tv && side.tv.played_count) bits.push(plural(side.tv.played_count, 'play'));
   if (side.lb) {
     if (side.lb.rating != null) bits.push(`rated ${side.lb.rating}`);
     if (side.lb.watchlisted_date) bits.push('watchlisted');
   }
-  const others = side.titles.filter((t) => t !== side.title);
+  if (!director) bits.push('<span class="muted">director unknown</span>');
+
+  const others = side.titles.filter((title) => title !== side.title);
   return `<div class="side">`
     + `<div class="side-label">${escapeHTML(label)}</div>`
     + `<div class="side-title">${escapeHTML(side.title)} `
     + `<span class="muted">(${side.year ?? '—'})</span></div>`
-    + (bits.length ? `<div class="side-bits">${bits.join(' \u00b7 ')}</div>` : '')
+    + `<div class="side-bits">${bits.join(' \u00b7 ')}</div>`
     + (others.length
         ? `<div class="side-bits muted">also known as: ${
              others.slice(0, 3).map(escapeHTML).join(', ')}</div>` : '')

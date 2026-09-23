@@ -357,6 +357,14 @@ def _describe(conn: sqlite3.Connection, key: str) -> dict | None:
         "WHERE s.work_id = ? AND s.source = 'lb' LIMIT 1", (work["id"],)
     ).fetchone()
     info["lb"] = dict(lb) if lb else None
+
+    # A Letterboxd export names no director, which is the one fact that
+    # settles most of these questions. TMDb supplies it.
+    tmdb = conn.execute(
+        "SELECT tmdb_id, directors, genres, runtime, year, title, original_title "
+        "FROM tmdb_film WHERE work_key = ? AND status = 'ok'", (key,)
+    ).fetchone()
+    info["tmdb"] = dict(tmdb) if tmdb else None
     return info
 
 
