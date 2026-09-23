@@ -125,8 +125,6 @@ class Handler(BaseHTTPRequestHandler):
                         conn, artwork.have(self.database),
                         posters.have(self.database),
                     ))
-                if path == "/api/directors":
-                    return self.send_json({"directors": queries.directors(conn)})
                 if path == "/api/stats":
                     return self.send_json(queries.stats(conn))
                 if path == "/api/changes":

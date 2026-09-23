@@ -287,19 +287,6 @@ def facets(conn: sqlite3.Connection) -> dict:
     return {"genres": genres, "shows": shows, "decades": decades}
 
 
-def directors(conn: sqlite3.Connection) -> list[dict]:
-    rows = conn.execute(
-        "SELECT d.director, COUNT(*) AS n, "
-        "       SUM(CASE WHEN i.played_count > 0 THEN 1 ELSE 0 END) AS played, "
-        "       MIN(NULLIF(i.year, 0)) AS first_year, "
-        "       MAX(NULLIF(i.year, 0)) AS last_year "
-        "FROM item_director d JOIN item i ON i.id = d.item_id "
-        "GROUP BY d.director COLLATE NOCASE "
-        "ORDER BY n DESC, d.director COLLATE NOCASE"
-    ).fetchall()
-    return [dict(r) for r in rows]
-
-
 def stats(conn: sqlite3.Connection) -> dict:
     one = lambda sql: conn.execute(sql).fetchone()[0]
     return {

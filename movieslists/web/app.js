@@ -53,13 +53,12 @@ const SORT_FIELDS = {
   episodes:     { label: 'Episodes',    type: 'number', get: (r) => r.episodes },
   seasons:      { label: 'Seasons',     type: 'number', get: (r) => r.seasons },
   watched:      { label: 'Watched',     type: 'number', get: (r) => r.watched },
-  films:        { label: 'Films',       type: 'number', get: (r) => r.count },
 };
 
 // Fields that read better largest-first when you first click them.
 const DESC_FIRST = new Set([
   'played_count', 'played_date', 'rating', 'date_added',
-  'episodes', 'seasons', 'watched', 'films',
+  'episodes', 'seasons', 'watched',
 ]);
 
 const nullsLast = (get, cmp) => (a, b) => {
@@ -99,7 +98,7 @@ function chainComparator(chain) {
 // ------------------------------------------------------------------- state
 
 const state = {
-  items: [], episodes: [], byKey: new Map(), shows: [], directors: [],
+  items: [], episodes: [], byKey: new Map(), shows: [],
   stats: null, editableFields: [],
   view: 'movies', search: '', genre: '', decade: '',
   // One scope control: All, Library, Played, Unplayed. The last three are
@@ -204,25 +203,6 @@ const VIEWS = {
     ],
   },
 
-  episodes: {
-    grid: '64px minmax(134px,2.4fr) minmax(104px,1.5fr) 60px minmax(124px,1.1fr) 60px 112px 82px',
-    columns: ['', 'Episode', 'Show', 'Year', 'Genre', 'Plays', 'Last played', 'Rating'],
-    sortColumns: [null, 'name', 'show', 'year', 'genre', 'played_count', 'played_date', 'rating'],
-    sortFields: ['name', 'show', 'year', 'genre', 'played_count', 'played_date', 'rating', 'date_added'],
-    defaultSort: [{ field: 'name', dir: 'asc' }],
-    source: () => state.episodes,
-    cells: (e) => [
-      artCell(e),
-      `<div class="cell title">${escapeHTML(e.name)}${editedTag(e)}</div>`,
-      `<div class="cell">${escapeHTML(e.show ?? '')}<div class="sub">${escapeHTML(episodeCode(e) || '')}</div></div>`,
-      `<div class="cell num muted">${e.year ?? '<span class="dash">—</span>'}</div>`,
-      e.genre ? `<div class="cell"><span class="pill">${escapeHTML(e.genre)}</span></div>` : dash(),
-      playsCell(e),
-      playedCell(e),
-      starCell(e),
-    ],
-  },
-
   shows: {
     grid: '72px minmax(190px,3fr) 88px 78px minmax(96px,1.2fr) 140px',
     columns: ['', 'Show', 'Episodes', 'Seasons', 'Genre', 'Last played'],
@@ -240,20 +220,6 @@ const VIEWS = {
     ],
   },
 
-  directors: {
-    grid: 'minmax(190px,3fr) 72px 82px 140px',
-    columns: ['Director', 'Films', 'Watched', 'Years'],
-    sortColumns: ['name', 'films', 'watched', 'year'],
-    sortFields: ['name', 'films', 'watched', 'year'],
-    defaultSort: [{ field: 'films', dir: 'desc' }, { field: 'name', dir: 'asc' }],
-    source: () => state.directors,
-    cells: (d) => [
-      `<div class="cell title">${escapeHTML(d.name)}<div class="sub">${escapeHTML(d.films.map((f) => f.name).slice(0, 3).join(' · '))}${d.films.length > 3 ? ' …' : ''}</div></div>`,
-      `<div class="cell num muted">${d.count}</div>`,
-      `<div class="cell num muted">${d.watched}</div>`,
-      `<div class="cell num muted">${d.years}</div>`,
-    ],
-  },
 };
 
 // -------------------------------------------------------------- aggregation
@@ -289,33 +255,6 @@ function buildShows(items) {
     year: g.years.length ? Math.min(...g.years) : null,
     director: null,
   }));
-}
-
-function buildDirectors(items) {
-  const groups = new Map();
-  for (const item of items) {
-    if (!item.director) continue;
-    for (const name of splitDirectors(item.director)) {
-      const key = name.toLowerCase();
-      let g = groups.get(key);
-      if (!g) {
-        g = { id: `dir:${key}`, name, films: [], watched: 0, played_date: null,
-              played_count: 0, media_kind: 'director' };
-        groups.set(key, g);
-      }
-      g.films.push(item);
-      if (item.played_count > 0) g.watched += 1;
-      g.played_count += item.played_count;
-      if (item.played_date && (!g.played_date || item.played_date > g.played_date)) g.played_date = item.played_date;
-    }
-  }
-  return [...groups.values()].map((g) => {
-    const years = g.films.map((f) => f.year).filter(Boolean);
-    const lo = years.length ? Math.min(...years) : null;
-    const hi = years.length ? Math.max(...years) : null;
-    return { ...g, count: g.films.length, year: lo, genre: null, director: g.name,
-             years: lo == null ? '—' : (lo === hi ? `${lo}` : `${lo}–${hi}`) };
-  });
 }
 
 // ----------------------------------------------------------- filter and sort
@@ -481,7 +420,7 @@ function renderRows() {
 }
 
 function renderCount() {
-  const noun = { movies: 'movie', episodes: 'episode', shows: 'show', directors: 'director' }[state.view];
+  const noun = { movies: 'film', shows: 'show' }[state.view] || 'item';
   $('count').textContent = plural(state.visible.length, noun);
   $('reset').hidden = !(state.search || state.genre || state.decade || state.scope);
 }
@@ -685,7 +624,6 @@ async function adoptFilm(tmdbId) {
     const data = await lib.json();
     state.items = unpack(data.columns, data.rows);
     state.byKey = new Map(state.items.map((i) => [i.key, i]));
-    state.directors = buildDirectors(state.items);
     render();
   }
   const row = state.byKey.get(added.work_key);
@@ -716,7 +654,6 @@ async function answerQuestion(id, same) {
       const data = await lib.json();
       state.items = unpack(data.columns, data.rows);
       state.byKey = new Map(state.items.map((i) => [i.key, i]));
-      state.directors = buildDirectors(state.items);
       applyFilters();
       renderRows();
       renderCount();
@@ -945,10 +882,6 @@ function renderAggregate(row) {
     add('Seasons', row.seasons || null);
     add('Genre', row.genre);
     add('First year', row.year);
-  } else {
-    lede = `${plural(row.count, 'film')} · ${row.watched} watched · ${row.years}`;
-    rows.push(['Films', row.films.slice()
-      .sort((a, b) => (b.year ?? 0) - (a.year ?? 0)).map(filmLabel).join('<br>')]);
   }
   const when = parseDate(row.played_date);
   add('Last played', when ? longDateFmt.format(when) : null);
@@ -1281,7 +1214,6 @@ function patchRow(detail) {
   row.my_watches = (detail.watches || []).length;
   row.liked = detail.effective.liked ? 1 : 0;
   state.shows = buildShows(state.episodes);
-  state.directors = buildDirectors(state.items);
   applyFilters();
 }
 
@@ -1494,7 +1426,7 @@ function wire() {
 // Movies list, which was mostly sitcom episodes.
 function renderFacets() {
   const rows = VIEWS[state.view].source();
-  const hasGenre = state.view !== 'directors';
+  const hasGenre = true;
 
   const genres = new Map();
   const decades = new Map();
@@ -1546,7 +1478,6 @@ async function boot() {
   state.episodes = unpack(data.columns, data.episodes || []);
   state.byKey = new Map(state.items.map((i) => [i.key, i]));
   state.shows = buildShows(state.episodes);
-  state.directors = buildDirectors(state.items);
   state.stats = data.stats;
   state.editableFields = data.editable_fields || [];
   state.fieldTypes = data.field_types || {};
