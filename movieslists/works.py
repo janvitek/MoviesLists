@@ -151,6 +151,22 @@ def rebuild(conn: sqlite3.Connection) -> dict:
     not derived, so they are replayed afterwards.
     """
     counts = {"tv": 0, "lb": 0, "entries": 0, "lists": 0}
+
+    # Films that exist only because you said so -- adopted from TMDb to log a
+    # viewing of something neither source has -- have no row to be rebuilt
+    # from. Remember them, or rebuilding would delete them and orphan their
+    # watch log.
+    adopted = [
+        dict(r) for r in conn.execute(
+            "SELECT w.key, w.title, w.year FROM work w "
+            "WHERE NOT EXISTS (SELECT 1 FROM work_source s WHERE s.work_id = w.id) "
+            "  AND (EXISTS (SELECT 1 FROM watch_log l "
+            "               WHERE l.work_key = w.key AND l.deleted = 0) "
+            "    OR EXISTS (SELECT 1 FROM work_override o WHERE o.work_key = w.key) "
+            "    OR EXISTS (SELECT 1 FROM tmdb_film t WHERE t.work_key = w.key))"
+        )
+    ]
+
     with conn:
         conn.execute("DELETE FROM work_source")
         conn.execute("DELETE FROM work_title")
@@ -180,6 +196,13 @@ def rebuild(conn: sqlite3.Connection) -> dict:
     ).fetchall():
         resolve(conn, row[0], row[1], "list")
         counts["lists"] += 1
+
+    for row in adopted:
+        work_id = resolve(conn, row["title"], row["year"], "manual")
+        # Keep the key it already had, since a watch log points at it.
+        conn.execute("UPDATE OR IGNORE work SET key = ? WHERE id = ?",
+                     (row["key"], work_id))
+    counts["adopted"] = len(adopted)
 
     counts["created"] = conn.execute("SELECT COUNT(*) FROM work").fetchone()[0] - before
     counts["merged"] = unify_obvious(conn)

@@ -612,6 +612,85 @@ function renderQuestions() {
     + `Your answer is remembered and survives re-importing.</p>${cards}</div>`;
 }
 
+// ------------------------------------------------------ logging a new film
+//
+// Most films you have just watched are already here, from TV.app or from the
+// Letterboxd export, so the library is searched first. TMDb is the fallback
+// for the ones neither knows, and adopting one creates the film here so a
+// viewing has something to attach to.
+
+function openLogger() {
+  state.detail = null;
+  state.selectedKey = null;
+  $('detail').hidden = false;
+  $('scrim').hidden = false;
+  renderLogger([], null);
+  const box = $('findFilm');
+  if (box) box.focus();
+}
+
+function renderLogger(matches, tmdb, query = '') {
+  const local = matches.slice(0, 8).map((row) => {
+    const bits = [row.year, row.director].filter(Boolean).join(' \u00b7 ');
+    return `<button class="found" data-openkey="${escapeHTML(row.key)}" type="button">`
+      + `<span class="found-title">${escapeHTML(row.name)}</span>`
+      + `<span class="found-bits">${escapeHTML(bits)}</span></button>`;
+  }).join('');
+
+  const remote = (tmdb || []).map((r) => {
+    const bits = [r.year, r.overview ? r.overview.slice(0, 70) + '…' : null]
+      .filter(Boolean).join(' \u00b7 ');
+    return `<button class="found" data-adopt="${escapeHTML(r.tmdb_id)}" type="button">`
+      + `<span class="found-title">${escapeHTML(r.title)}</span>`
+      + `<span class="found-bits">${escapeHTML(bits)}</span></button>`;
+  }).join('');
+
+  $('detailBody').innerHTML = `<div class="detail-inner">`
+    + `<h2>Log a film</h2>`
+    + `<p class="lede">Find it in your library, or look it up if it is not here yet.</p>`
+    + `<input type="search" id="findFilm" class="find" placeholder="Title…" `
+    + `value="${escapeHTML(query)}" autocomplete="off">`
+    + (local ? `<div class="section-head"><h3>In your library</h3></div>${local}` : '')
+    + (query.trim().length > 1
+        ? `<div class="section-head"><h3>Not here?</h3>`
+          + `<button class="btn" id="searchTmdb" type="button">Search TMDb</button></div>`
+        : '')
+    + (remote ? `<div class="found-list">${remote}</div>` : '')
+    + (tmdb && !tmdb.length ? '<p class="muted">Nothing at TMDb for that.</p>' : '')
+    + `</div>`;
+  const box = $('findFilm');
+  if (box) {
+    box.focus();
+    box.setSelectionRange(box.value.length, box.value.length);
+  }
+}
+
+async function adoptFilm(tmdbId) {
+  $('detailBody').innerHTML = '<div class="detail-inner"><p class="muted">adding…</p></div>';
+  const response = await fetch('api/tmdb/adopt', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ tmdb_id: tmdbId }),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    $('detailBody').innerHTML = '<div class="detail-inner"><p class="muted">'
+      + escapeHTML(error.error || 'could not add that film') + '</p></div>';
+    return;
+  }
+  const added = await response.json();
+  // The film is new, so the list has to learn about it before we open it.
+  const lib = await fetch('api/library');
+  if (lib.ok) {
+    const data = await lib.json();
+    state.items = unpack(data.columns, data.rows);
+    state.byKey = new Map(state.items.map((i) => [i.key, i]));
+    state.directors = buildDirectors(state.items);
+    render();
+  }
+  const row = state.byKey.get(added.work_key);
+  if (row) openDetail(row);
+}
+
 function openQuestions() {
   state.detail = null;
   state.selectedKey = null;
@@ -906,7 +985,7 @@ function sourceSummary(detail) {
     if (tmdb.directors) bits.push(escapeHTML(tmdb.directors));
     if (tmdb.genres) bits.push(escapeHTML(tmdb.genres));
     if (tmdb.runtime) bits.push(`${tmdb.runtime}m`);
-    if (tmdb.vote_average) bits.push(`${tmdb.vote_average}/10`);
+    if (tmdb.vote_average) bits.push(`${Number(tmdb.vote_average).toFixed(1)}/10`);
     const href = tmdb.tmdb_id
       ? ` <a href="https://www.themoviedb.org/movie/${encodeURIComponent(tmdb.tmdb_id)}"`
         + ` target="_blank" rel="noopener noreferrer">open \u2197</a>` : '';
@@ -917,20 +996,52 @@ function sourceSummary(detail) {
   return `<div class="sources">${parts.join('')}</div>`;
 }
 
-function viewingHistory(entries) {
-  if (!entries || !entries.length) return '';
-  const rows = entries.slice(0, 40).map((e) => {
-    const when = showDate(e.watched_date || e.logged_date) || '—';
-    const stars = e.rating ? ` <span class="muted">${e.rating}\u2605</span>` : '';
-    const again = e.rewatch ? ' <span class="muted">rewatch</span>' : '';
-    const tags = e.tags ? ` <span class="muted">${escapeHTML(e.tags)}</span>` : '';
-    return `<li>${when}${stars}${again}${tags}</li>`;
+const today = () => new Date().toISOString().slice(0, 10);
+
+// Both kinds of viewing in one list, newest first, each saying where it came
+// from. Only the ones logged here can be removed; Letterboxd's belong to the
+// export.
+function viewingHistory(detail) {
+  const mine = (detail.watches || []).map((w) => ({
+    when: w.watched_date, rating: w.rating ? w.rating / 20 : null,
+    rewatch: w.rewatch, note: w.note, venue: w.venue, id: w.id, own: true,
+  }));
+  const theirs = (detail.entries || []).map((e) => ({
+    when: e.watched_date || e.logged_date, rating: e.rating,
+    rewatch: e.rewatch, note: null, venue: null, id: null, own: false,
+  }));
+  const all = [...mine, ...theirs]
+    .filter((v) => v.when)
+    .sort((a, b) => String(b.when).localeCompare(String(a.when)));
+
+  const rows = all.slice(0, 60).map((v) => {
+    // Half stars are real: 4.5 must not read as 5.
+    const shown = v.rating == null ? null
+      : (Math.round(v.rating * 2) / 2).toString().replace(/\.0$/, '');
+    const stars = shown ? ` <span class="muted">${shown}\u2605</span>` : '';
+    const again = v.rewatch ? ' <span class="muted">rewatch</span>' : '';
+    const where = v.venue ? ` <span class="muted">${escapeHTML(v.venue)}</span>` : '';
+    const note = v.note ? `<div class="hist-note md">${renderMarkdown(v.note)}</div>` : '';
+    const drop = v.own
+      ? ` <button class="hist-drop" data-dropwatch="${v.id}" title="remove">\u00d7</button>`
+      : '';
+    const tag = v.own ? '' : ' <span class="hist-src">LB</span>';
+    return `<li>${showDate(v.when) || v.when}${stars}${again}${where}${tag}${drop}${note}</li>`;
   }).join('');
-  const more = entries.length > 40
-    ? `<li class="muted">… and ${entries.length - 40} more</li>` : '';
+
+  const form = `<div class="logger">`
+    + `<input type="date" id="logDate" value="${today()}" max="${today()}">`
+    + `<input type="number" id="logRating" min="0" max="5" step="0.5" placeholder="\u2605">`
+    + `<input type="text" id="logVenue" placeholder="where (optional)">`
+    + `<button class="btn btn--primary" id="logWatch" type="button">Log a watch</button>`
+    + `<textarea id="logNote" rows="2" placeholder="note (optional, Markdown)"></textarea>`
+    + `</div>`;
+
   return `<div class="section-head"><h3>Viewing history</h3>`
-    + `<span class="save-note">${plural(entries.length, 'entry')} from Letterboxd</span></div>`
-    + `<ul class="history">${rows}${more}</ul>`;
+    + `<span class="save-note">${all.length ? plural(all.length, 'viewing') : 'none recorded'}`
+    + `</span></div>`
+    + (rows ? `<ul class="history">${rows}</ul>` : '')
+    + form;
 }
 
 function fieldControl(key, label, type, eff, imported, over) {
@@ -1011,7 +1122,7 @@ function renderItemDetail() {
     + lookupLinks(eff)
     + lists
     + (eff.long_description ? `<p class="blurb">${escapeHTML(eff.long_description)}</p>` : '')
-    + viewingHistory(d.entries)
+    + viewingHistory(d)
     + `<div class="section-head"><h3>Edit</h3>`
     + `<span class="save-note" id="saveNote">edits are stored separately from every source</span></div>`
     + `<div class="edit">${primary}`
@@ -1077,6 +1188,35 @@ async function setFlag(row, field, value) {
   renderRows();
 }
 
+async function logWatch(key) {
+  const stars = Number.parseFloat($('logRating').value);
+  const body = {
+    watched_date: $('logDate').value || today(),
+    rating: Number.isFinite(stars) && stars > 0 ? Math.round(stars * 20) : null,
+    venue: $('logVenue').value.trim() || null,
+    note: $('logNote').value.trim() || null,
+  };
+  const response = await fetch(`api/work/${encodeURIComponent(key)}/watch`,
+    { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body) });
+  if (!response.ok) return;
+  const payload = await response.json();
+  state.detail = payload.item;
+  patchRow(payload.item);
+  renderItemDetail();
+  renderRows();
+}
+
+async function dropWatch(id) {
+  const response = await fetch(`api/watch/${id}`, { method: 'DELETE' });
+  if (!response.ok) return;
+  const payload = await response.json();
+  state.detail = payload.item;
+  patchRow(payload.item);
+  renderItemDetail();
+  renderRows();
+}
+
 async function saveEdits() {
   if (!state.detail || !state.dirty.size) return;
   const fields = {};
@@ -1125,6 +1265,7 @@ function patchRow(detail) {
   row.edited = Object.keys(detail.overrides).length > 0 ? 1 : 0;
   row.reviewed = detail.effective.review ? 1 : 0;
   row.watchlisted = detail.effective.watchlisted ? 1 : 0;
+  row.my_watches = (detail.watches || []).length;
   row.liked = detail.effective.liked ? 1 : 0;
   state.shows = buildShows(state.episodes);
   state.directors = buildDirectors(state.items);
@@ -1273,6 +1414,11 @@ function wire() {
     if (flag && state.detail) {
       return void setFlag(state.byKey.get(state.detail.key), flag.dataset.flag);
     }
+    if (e.target.id === 'logWatch' && state.detail) {
+      return void logWatch(state.detail.key);
+    }
+    const drop = e.target.closest('[data-dropwatch]');
+    if (drop) return void dropWatch(drop.dataset.dropwatch);
     const revert = e.target.dataset?.revert;
     if (revert) revertField(revert);
   });
@@ -1280,6 +1426,36 @@ function wire() {
   $('detailClose').addEventListener('click', () => closeDetail());
   $('scrim').addEventListener('click', () => closeDetail());
   $('linksOpen').addEventListener('click', openQuestions);
+  $('logFilm').addEventListener('click', openLogger);
+
+  $('detailBody').addEventListener('input', debounce((e) => {
+    if (e.target.id !== 'findFilm') return;
+    const q = e.target.value.trim().toLowerCase();
+    const matches = q.length < 2 ? [] : state.items.filter((r) =>
+      (r.name || '').toLowerCase().includes(q)).slice(0, 8);
+    renderLogger(matches, null, e.target.value);
+  }, 180));
+
+  $('detailBody').addEventListener('click', async (e) => {
+    const open = e.target.closest('[data-openkey]');
+    if (open) {
+      const row = state.byKey.get(open.dataset.openkey);
+      if (row) openDetail(row);
+      return;
+    }
+    const adopt = e.target.closest('[data-adopt]');
+    if (adopt) return void adoptFilm(adopt.dataset.adopt);
+    if (e.target.id === 'searchTmdb') {
+      const query = $('findFilm').value.trim();
+      const box = $('searchTmdb');
+      box.textContent = 'searching…';
+      const response = await fetch('api/tmdb/search?q=' + encodeURIComponent(query));
+      const data = response.ok ? await response.json() : { results: [] };
+      const matches = state.items.filter((r) =>
+        (r.name || '').toLowerCase().includes(query.toLowerCase())).slice(0, 8);
+      renderLogger(matches, data.results || [], query);
+    }
+  });
   $('detailBody').addEventListener('click', (e) => {
     const button = e.target.closest('[data-same]');
     if (!button) return;

@@ -205,6 +205,33 @@ recorded including the misses, so a title is searched once and not again, and
 TMDb's title and original title are fed back into the titles table — an
 original title is exactly what a later import might arrive spelling.
 
+## Logging a viewing
+
+Three sources describe a viewing and none is complete. TV.app knows it played
+a file and remembers one date. Letterboxd knows what you chose to log there.
+Neither knows about the cinema, or a friend's sofa, or a film watched before
+either existed.
+
+So viewings you record live in `watch_log`, a table rather than an override —
+a viewing is not a field, and one film can have many. Each carries a date and
+optionally a rating, a place and a note in Markdown; a rewatch is inferred
+from whether any source already saw it earlier.
+
+In the detail panel, the viewing history shows your entries and Letterboxd's
+together, newest first, each saying where it came from. Only yours can be
+removed. The play count is TV.app's and Letterboxd's reconciled — whichever
+saw more, since they describe the same history — **plus** the ones you logged
+here, which by definition neither noticed.
+
+For a film that is in neither source, **+ Log a film** searches your library
+first and falls back to TMDb. Adopting a result creates the film here, with
+its director, genre, runtime and poster, so a viewing has something to hang
+on. Such a film has no row in TV.app or Letterboxd to be rebuilt from, so
+`rebuild` remembers it explicitly rather than deleting it on the next import.
+
+Viewings sync between machines like every other edit, merged by uuid so two
+machines that each logged one keep both, and deleted with a tombstone.
+
 ## Two machines, one shared folder
 
 Edits are shared across machines; the cached library is not. That split is
