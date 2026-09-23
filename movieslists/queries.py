@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import sqlite3
 
+import re
+
 from . import db, watching
 
 # An episode's `director` is really its show name, and some films are filed
@@ -60,6 +62,23 @@ def _tv_side(conn):
     ):
         rows.setdefault(row["key"], dict(row))
     return rows
+
+
+# A library title often ends in the film's year -- "Anna Karenina (2012)".
+# That is not noise: whoever tagged the file put the right year there, and
+# TV.app's own year field is frequently wrong about the same film. "Reds
+# (1981)" is filed under 2006. So the year is read out of the title and used,
+# and the title is shown without it, since the year has its own column.
+_TITLE_YEAR = re.compile(r"^(.*?)[\s(]*\(((?:19|20)\d{2})\)\s*$")
+
+
+def split_title_year(title: str | None) -> tuple[str | None, int | None]:
+    match = _TITLE_YEAR.match(title or "")
+    if not match:
+        return title, None
+    stem = match.group(1).strip()
+    # "(2007)" alone is a title, not a year to strip.
+    return (stem or title), int(match.group(2)) if stem else None
 
 
 def _tmdb_side(conn):
@@ -145,13 +164,17 @@ def library(conn: sqlite3.Connection, art_ids: set[int] | None = None,
                                   mine.get("last")) if d]
         played_date = max(candidates) if candidates else None
 
+        raw_name = ((t or {}).get("name") or (f or {}).get("name")
+                    or work["title"])
+        clean_name, title_year = split_title_year(raw_name)
+
         values = {
             "key": key,
-            "name": (t or {}).get("name") or (f or {}).get("name") or work["title"],
-            # Letterboxd's year is preferred over TV.app's: where they differ
-            # TV.app is usually the one that is wrong, filing Batman Returns
-            # under 1997 and Byzantium under 2009.
-            "year": ((f or {}).get("year") or (t or {}).get("year")
+            "name": clean_name,
+            # Letterboxd first, since where it and TV.app differ TV.app is
+            # usually wrong. Then the year written into the title, which beats
+            # TV.app's own field for the same reason.
+            "year": ((f or {}).get("year") or title_year or (t or {}).get("year")
                      or work["year"] or m.get("year")),
             "genre": (t or {}).get("genre") or _first(m.get("genres")),
             "director": (t or {}).get("director") or m.get("directors"),
@@ -354,10 +377,12 @@ def work_detail(conn: sqlite3.Connection, key: str) -> dict | None:
 
     primary = tv[0] if tv else {}
     film = films[0] if films else {}
+    raw_name = primary.get("name") or film.get("name") or work["title"]
+    clean_name, title_year = split_title_year(raw_name)
     effective = {
-        "name": primary.get("name") or film.get("name") or work["title"],
-        "year": (film.get("year") or primary.get("year") or work["year"]
-                 or tmdb.get("year")),
+        "name": clean_name,
+        "year": (film.get("year") or title_year or primary.get("year")
+                 or work["year"] or tmdb.get("year")),
         "genre": primary.get("genre") or _first(tmdb.get("genres")),
         "director": primary.get("director") or tmdb.get("directors"),
         "media_kind": primary.get("media_kind") or "movie",
