@@ -17,6 +17,11 @@
   <button class="banner-close" id="alertDismiss">Dismiss</button>
 </div>
 
+<div class="banner banner--ask" id="links" hidden>
+  <div class="banner-body"><span id="linksText"></span></div>
+  <button class="banner-close" id="linksOpen">Review</button>
+</div>
+
 <div class="banner banner--info" id="notice" hidden>
   <div class="banner-body"><span id="noticeText"></span></div>
   <button class="banner-close" id="noticeDismiss">Dismiss</button>
@@ -43,16 +48,8 @@
   </label>
   <select id="genre"  class="filter"><option value="">All genres</option></select>
   <select id="decade" class="filter"><option value="">All decades</option></select>
-  <div class="segmented" id="sourceToggle" role="group" aria-label="Filter by source">
-    <button class="seg is-active" data-source="" type="button">All</button>
-    <button class="seg" data-source="tv" type="button">In library</button>
-    <button class="seg" data-source="lb" type="button">Letterboxd only</button>
-  </div>
-  <div class="segmented" id="playedToggle" role="group" aria-label="Filter by played">
-    <button class="seg is-active" data-played="" type="button">All</button>
-    <button class="seg" data-played="any" type="button">Played</button>
-    <button class="seg" data-played="never" type="button">Unplayed</button>
-  </div>
+  <button class="scope" id="scopeToggle" type="button"
+          title="Click to cycle: All, Library, Played, Unplayed"></button>
   <select id="playedDetail" class="filter" hidden
           aria-label="Narrow played items by whether a date was recorded">
     <option value="any">Any play date</option>

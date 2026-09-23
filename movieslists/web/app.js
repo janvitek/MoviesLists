@@ -97,28 +97,41 @@ const state = {
   items: [], episodes: [], byKey: new Map(), shows: [], directors: [],
   stats: null, editableFields: [],
   view: 'movies', search: '', genre: '', decade: '',
-  played: '', playedDetail: 'any', playedCounts: { all: 0, any: 0, never: 0 },
-  source: '', sourceCounts: { all: 0, tv: 0, lb: 0 },
+  // One scope control: All, Library, Played, Unplayed. The last three are
+  // all about films you actually own, so each of them excludes titles that
+  // exist only on Letterboxd.
+  scope: '', playedDetail: 'any',
+  scopeCounts: { all: 0, library: 0, played: 0, unplayed: 0 },
   sortChain: [],
   visible: [], selectedKey: null, detail: null, dirty: new Map(),
 };
 
 // ------------------------------------------------------------------- views
 
-const artCell = (id, hasArt) => (hasArt
-  ? `<div class="cell"><img class="art" src="art/thumb/${id}.jpg" alt="" loading="lazy" decoding="async"></div>`
-  : `<div class="cell"><div class="art art--empty" role="img" aria-label="no artwork"></div></div>`);
+// TV.app supplies 16:9 stills; a film it does not have falls back to a
+// portrait poster, so the cell holds either shape.
+function artCell(row) {
+  const src = row.has_art ? `art/thumb/${row.tv_id}.jpg`
+    : row.has_poster ? `art/poster/thumb/${encodeURIComponent(row.key)}.jpg`
+    : null;
+  if (!src) {
+    return '<div class="cell"><div class="art art--empty" role="img" aria-label="no artwork"></div></div>';
+  }
+  const shape = row.has_art ? 'art' : 'art art--poster';
+  return `<div class="cell"><img class="${shape}" src="${src}" alt="" `
+    + `loading="lazy" decoding="async" onerror="this.className='art art--empty'"></div>`;
+}
 
 const dash = () => '<div class="cell"><span class="dash">—</span></div>';
 const cellOrDash = (v) => (v ? `<div class="cell">${escapeHTML(v)}</div>` : dash());
 // Which sources know about this film. A film only Letterboxd knows about is
 // one you have watched but do not own, which is worth seeing at a glance.
 const badges = (row) => (row.sources === 'lb'
-    ? '<span class="tag-lb" title="on Letterboxd; not in your TV.app library">letterboxd</span>'
+    ? '<span class="tag-lb" title="on Letterboxd; not in your TV.app library">LB</span>'
     : '')
   + (row.watchlisted ? '<span class="tag-watch" title="on your watchlist">watchlist</span>' : '')
   + (row.edited ? '<span class="tag-edited">edited</span>' : '')
-  + (row.reviewed ? '<span class="tag-review" title="you wrote a review">review</span>' : '');
+  + (row.reviewed ? '<span class="tag-review" title="you wrote a review">R</span>' : '');
 const editedTag = badges;
 
 const episodeCode = (e) => {
@@ -169,7 +182,7 @@ const VIEWS = {
     defaultSort: [{ field: 'name', dir: 'asc' }],
     source: () => state.items,
     cells: (m) => [
-      artCell(m.tv_id, m.has_art),
+      artCell(m),
       `<div class="cell title">${escapeHTML(m.name)}${editedTag(m)}</div>`,
       cellOrDash(m.director),
       `<div class="cell num muted">${m.year ?? '<span class="dash">—</span>'}</div>`,
@@ -188,7 +201,7 @@ const VIEWS = {
     defaultSort: [{ field: 'name', dir: 'asc' }],
     source: () => state.episodes,
     cells: (e) => [
-      artCell(e.tv_id, e.has_art),
+      artCell(e),
       `<div class="cell title">${escapeHTML(e.name)}${editedTag(e)}</div>`,
       `<div class="cell">${escapeHTML(e.show ?? '')}<div class="sub">${escapeHTML(episodeCode(e) || '')}</div></div>`,
       `<div class="cell num muted">${e.year ?? '<span class="dash">—</span>'}</div>`,
@@ -207,7 +220,7 @@ const VIEWS = {
     defaultSort: [{ field: 'name', dir: 'asc' }],
     source: () => state.shows,
     cells: (s) => [
-      artCell(s.artId, s.artId != null),
+      artCell({ tv_id: s.artId, has_art: s.artId != null, has_poster: 0 }),
       `<div class="cell title">${escapeHTML(s.name)}<div class="sub">${s.watched} of ${s.episodes} watched</div></div>`,
       `<div class="cell num muted">${s.episodes}</div>`,
       `<div class="cell num muted">${s.seasons || '<span class="dash">—</span>'}</div>`,
@@ -297,6 +310,7 @@ function buildDirectors(items) {
 // ----------------------------------------------------------- filter and sort
 
 const isPlayed = (r) => (r.played_count || 0) > 0 || !!r.played_date;
+const inLibrary = (r) => r.sources !== 'lb';
 
 function applyFilters() {
   let rows = VIEWS[state.view].source();
@@ -310,27 +324,29 @@ function applyFilters() {
     });
   }
   if (state.genre) rows = rows.filter((r) => r.genre === state.genre);
-
-  const owned = rows.filter((r) => r.sources !== 'lb').length;
-  state.sourceCounts = { all: rows.length, tv: owned, lb: rows.length - owned };
-  if (state.source === 'tv') rows = rows.filter((r) => r.sources !== 'lb');
-  else if (state.source === 'lb') rows = rows.filter((r) => r.sources === 'lb');
   if (state.decade) {
     const from = Number(state.decade);
     rows = rows.filter((r) => r.year != null && r.year >= from && r.year < from + 10);
   }
 
-  // Counted before the played filter is applied, so the toggle can show how
-  // many each choice would yield under the filters already active.
-  const played = rows.filter(isPlayed).length;
-  state.playedCounts = { all: rows.length, any: played, never: rows.length - played };
+  // Counted before the scope is applied, so each segment can show what it
+  // would yield under the filters already active.
+  const owned = rows.filter(inLibrary);
+  state.scopeCounts = {
+    all: rows.length,
+    library: owned.length,
+    played: owned.filter(isPlayed).length,
+    unplayed: owned.filter((r) => !isPlayed(r)).length,
+  };
 
-  if (state.played === 'any') {
-    rows = rows.filter(isPlayed);
+  if (state.scope === 'library') {
+    rows = rows.filter(inLibrary);
+  } else if (state.scope === 'played') {
+    rows = rows.filter((r) => inLibrary(r) && isPlayed(r));
     if (state.playedDetail === 'dated') rows = rows.filter((r) => r.played_date);
     else if (state.playedDetail === 'undated') rows = rows.filter((r) => !r.played_date);
-  } else if (state.played === 'never') {
-    rows = rows.filter((r) => !isPlayed(r));
+  } else if (state.scope === 'unplayed') {
+    rows = rows.filter((r) => inLibrary(r) && !isPlayed(r));
   }
 
   state.visible = state.sortChain.length
@@ -393,30 +409,27 @@ function renderSortBar() {
   $('sortReset').hidden = sameChain(state.sortChain, view.defaultSort);
 }
 
-function renderSourceToggle() {
-  const counts = state.sourceCounts;
-  for (const button of $('sourceToggle').children) {
-    const key = button.dataset.source;
-    const n = key === 'tv' ? counts.tv : key === 'lb' ? counts.lb : counts.all;
-    button.classList.toggle('is-active', state.source === key);
-    button.innerHTML = `${escapeHTML(button.dataset.label)}`
-      + `<span class="seg-count">${n.toLocaleString()}</span>`;
-  }
-  // Only films have a Letterboxd side; episodes and aggregates do not.
-  $('sourceToggle').hidden = state.view !== 'movies';
-}
+// One button, cycled by clicking. Library, Played and Unplayed are all about
+// films you own, so each of them drops the Letterboxd-only titles.
+const SCOPES = [
+  { key: '',         label: 'All' },
+  { key: 'library',  label: 'Library' },
+  { key: 'played',   label: 'Played' },
+  { key: 'unplayed', label: 'Unplayed' },
+];
 
-function renderPlayedToggle() {
-  const counts = state.playedCounts;
-  for (const button of $('playedToggle').children) {
-    const key = button.dataset.played;
-    const n = key === 'any' ? counts.any : key === 'never' ? counts.never : counts.all;
-    button.classList.toggle('is-active', state.played === key);
-    button.innerHTML = `${escapeHTML(button.dataset.label)}`
-      + `<span class="seg-count">${n.toLocaleString()}</span>`;
-  }
+function renderScopeToggle() {
+  const at = SCOPES.findIndex((s) => s.key === state.scope);
+  const current = SCOPES[at < 0 ? 0 : at];
+  const next = SCOPES[((at < 0 ? 0 : at) + 1) % SCOPES.length];
+  const count = state.scopeCounts[current.key || 'all'] ?? 0;
+  const button = $('scopeToggle');
+  button.innerHTML = `${escapeHTML(current.label)}`
+    + `<span class="seg-count">${count.toLocaleString()}</span>`;
+  button.classList.toggle('is-filtered', Boolean(current.key));
+  button.title = `Showing ${current.label.toLowerCase()} — click for ${next.label.toLowerCase()}`;
   // The date refinement only means anything for items that were played.
-  $('playedDetail').hidden = state.played !== 'any';
+  $('playedDetail').hidden = state.scope !== 'played';
 }
 
 function setSort(field, additive) {
@@ -459,16 +472,14 @@ function renderRows() {
 function renderCount() {
   const noun = { movies: 'movie', episodes: 'episode', shows: 'show', directors: 'director' }[state.view];
   $('count').textContent = plural(state.visible.length, noun);
-  $('reset').hidden = !(state.search || state.genre || state.decade
-                        || state.played || state.source);
+  $('reset').hidden = !(state.search || state.genre || state.decade || state.scope);
 }
 
 function render() {
   applyFilters();
   renderHead();
   renderSortBar();
-  renderSourceToggle();
-  renderPlayedToggle();
+  renderScopeToggle();
   $('scroller').scrollTop = 0;
   renderRows();
   renderCount();
@@ -495,6 +506,114 @@ function renderChanges(summary) {
     $('noticeText').textContent =
       `Since the last import: ${summary.added || 0} added, ${summary.modified || 0} changed.`;
     $('notice').hidden = false;
+  }
+}
+
+// ---------------------------------------------------------- link questions
+//
+// Where the evidence for two records being one film is suggestive but not
+// conclusive, the app asks instead of guessing. Either answer is kept, so a
+// pair is never raised twice.
+
+async function loadQuestions() {
+  try {
+    const response = await fetch('api/questions');
+    if (!response.ok) return;
+    const data = await response.json();
+    state.questions = data.questions || [];
+    renderQuestionBanner();
+  } catch { /* the banner is optional; a failure here is not worth reporting */ }
+}
+
+function renderQuestionBanner() {
+  const n = (state.questions || []).length;
+  $('links').hidden = n === 0;
+  if (n) {
+    $('linksText').textContent = n === 1
+      ? 'One film may be the same in both sources — is it?'
+      : `${n} films may be the same in both sources — are they?`;
+  }
+}
+
+function sideCard(side, label) {
+  const bits = [];
+  if (side.tv) {
+    if (side.tv.genre) bits.push(escapeHTML(side.tv.genre));
+    if (side.tv.director) bits.push(escapeHTML(side.tv.director));
+    if (side.tv.duration) bits.push(duration(side.tv.duration));
+    if (side.tv.played_count) bits.push(plural(side.tv.played_count, 'play'));
+  }
+  if (side.lb) {
+    if (side.lb.rating != null) bits.push(`rated ${side.lb.rating}`);
+    if (side.lb.watchlisted_date) bits.push('watchlisted');
+  }
+  const others = side.titles.filter((t) => t !== side.title);
+  return `<div class="side">`
+    + `<div class="side-label">${escapeHTML(label)}</div>`
+    + `<div class="side-title">${escapeHTML(side.title)} `
+    + `<span class="muted">(${side.year ?? '—'})</span></div>`
+    + (bits.length ? `<div class="side-bits">${bits.join(' \u00b7 ')}</div>` : '')
+    + (others.length
+        ? `<div class="side-bits muted">also known as: ${
+             others.slice(0, 3).map(escapeHTML).join(', ')}</div>` : '')
+    + `</div>`;
+}
+
+function renderQuestions() {
+  const list = state.questions || [];
+  if (!list.length) {
+    $('detailBody').innerHTML = '<div class="detail-inner"><h2>Nothing to settle</h2>'
+      + '<p class="muted">Every film that could be matched has been.</p></div>';
+    return;
+  }
+  const cards = list.map((q) => {
+    const left = q.left.sources.includes('tv') ? q.left : q.right;
+    const right = left === q.left ? q.right : q.left;
+    return `<div class="question" data-question="${escapeHTML(q.id)}">`
+      + `<div class="question-why">${escapeHTML(q.reason)}</div>`
+      + sideCard(left, 'In your library (TV.app)')
+      + sideCard(right, 'On Letterboxd')
+      + `<div class="question-actions">`
+      + `<button class="btn btn--primary" data-same="1">Same film</button>`
+      + `<button class="btn" data-same="0">Different films</button>`
+      + `</div></div>`;
+  }).join('');
+
+  $('detailBody').innerHTML = `<div class="detail-inner">`
+    + `<h2>Are these the same film?</h2>`
+    + `<p class="lede">${plural(list.length, 'pair')} the app could not settle on its own. `
+    + `Your answer is remembered and survives re-importing.</p>${cards}</div>`;
+}
+
+function openQuestions() {
+  state.detail = null;
+  state.selectedKey = null;
+  $('detail').hidden = false;
+  $('scrim').hidden = false;
+  renderQuestions();
+}
+
+async function answerQuestion(id, same) {
+  const response = await fetch('api/questions/answer', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id, same }),
+  });
+  if (!response.ok) return;
+  state.questions = (state.questions || []).filter((q) => q.id !== id);
+  renderQuestionBanner();
+  renderQuestions();
+  if (same) {
+    // A merge changes which films exist, so reload the list underneath.
+    const lib = await fetch('api/library');
+    if (lib.ok) {
+      const data = await lib.json();
+      state.items = unpack(data.columns, data.rows);
+      state.byKey = new Map(state.items.map((i) => [i.key, i]));
+      state.directors = buildDirectors(state.items);
+      applyFilters();
+      renderRows();
+      renderCount();
+    }
   }
 }
 
@@ -841,7 +960,8 @@ function renderItemDetail() {
 
   const hero = d.art_id
     ? `<img class="hero" src="art/full/${d.art_id}.jpg" alt="" onerror="this.remove()">`
-    : '';
+    : `<img class="hero hero--poster" src="art/poster/full/${encodeURIComponent(d.key)}.jpg"`
+      + ` alt="" onerror="this.remove()">`;
 
   $('detailBody').innerHTML = hero + `<div class="detail-inner">`
     + `<h2>${escapeHTML(eff.name ?? '')}</h2>`
@@ -991,23 +1111,11 @@ function wire() {
     $(id).addEventListener('change', (e) => { state[key] = e.target.value; render(); });
   }
 
-  // Remember each segment's label once; renderPlayedToggle rewrites the
+  // Remember each segment's label once; renderScopeToggle rewrites the
   // button contents to append a count.
-  for (const group of ['playedToggle', 'sourceToggle']) {
-    for (const button of $(group).children) {
-      button.dataset.label = button.textContent.trim();
-    }
-  }
-  $('sourceToggle').addEventListener('click', (e) => {
-    const button = e.target.closest('.seg');
-    if (!button) return;
-    state.source = button.dataset.source;
-    render();
-  });
-  $('playedToggle').addEventListener('click', (e) => {
-    const button = e.target.closest('.seg');
-    if (!button) return;
-    state.played = button.dataset.played;
+  $('scopeToggle').addEventListener('click', () => {
+    const at = SCOPES.findIndex((s) => s.key === state.scope);
+    state.scope = SCOPES[((at < 0 ? 0 : at) + 1) % SCOPES.length].key;
     render();
   });
   $('playedDetail').addEventListener('change', (e) => {
@@ -1016,7 +1124,7 @@ function wire() {
   });
 
   $('reset').addEventListener('click', () => {
-    state.search = state.genre = state.decade = state.played = state.source = '';
+    state.search = state.genre = state.decade = state.scope = '';
     state.playedDetail = 'any';
     $('search').value = '';
     $('genre').value = $('decade').value = '';
@@ -1106,6 +1214,13 @@ function wire() {
 
   $('detailClose').addEventListener('click', () => closeDetail());
   $('scrim').addEventListener('click', () => closeDetail());
+  $('linksOpen').addEventListener('click', openQuestions);
+  $('detailBody').addEventListener('click', (e) => {
+    const button = e.target.closest('[data-same]');
+    if (!button) return;
+    const card = button.closest('[data-question]');
+    if (card) answerQuestion(card.dataset.question, button.dataset.same === '1');
+  });
   $('alertDismiss').addEventListener('click', () => { $('alert').hidden = true; acknowledge(); });
   $('noticeDismiss').addEventListener('click', () => { $('notice').hidden = true; acknowledge(); });
 
@@ -1168,6 +1283,7 @@ async function boot() {
   populateFilters(data.facets);
   wire();
   render();
+  loadQuestions();
 }
 
 boot().catch((err) => {

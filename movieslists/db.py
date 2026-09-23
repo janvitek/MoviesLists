@@ -14,7 +14,7 @@ import sqlite3
 from pathlib import Path
 
 # Bumped whenever the column set changes; a mismatch rebuilds the cache.
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 9
 
 # (JSON key from extract.js, SQL column, SQL type). Order defines the table.
 COLUMNS: list[tuple[str, str, str]] = [
@@ -173,17 +173,49 @@ CREATE TABLE IF NOT EXISTS work (
     created_at TEXT NOT NULL
 );
 
--- Derivation alone cannot cover everything: TV.app files "12 (2007)" under
--- 2009 while Letterboxd says 2007, and the same film is released under
--- different titles. An alias records a key that has been decided to mean an
--- existing work, so the decision is made once and holds for every later
--- import.
-CREATE TABLE IF NOT EXISTS work_alias (
-    key        TEXT PRIMARY KEY,
+-- Every title a film is known by, from every source that named it: TV.app's
+-- spelling, Letterboxd's, the alternate title in parentheses, whatever a list
+-- called it. This is what an incoming title is looked up against, so a film
+-- found once under any name is found again under all of them.
+CREATE TABLE IF NOT EXISTS work_title (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
     work_id    INTEGER NOT NULL REFERENCES work(id) ON DELETE CASCADE,
-    reason     TEXT,                   -- derived | year-drift | alt-title | manual
-    created_at TEXT NOT NULL
+    title      TEXT NOT NULL,          -- as that source spelled it
+    normalized TEXT NOT NULL,          -- folded for comparison
+    year       INTEGER,
+    source     TEXT,                   -- tv | lb | list | alt | manual
+    is_primary INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    UNIQUE (work_id, normalized, year)
 );
+
+CREATE INDEX IF NOT EXISTS idx_work_title_lookup ON work_title(normalized, year);
+CREATE INDEX IF NOT EXISTS idx_work_title_work   ON work_title(work_id);
+
+-- Links the app is unsure about. Rather than guess or stay silent it asks,
+-- and the answer -- either answer -- is kept.
+--
+-- Keyed by work *key* rather than row id on purpose. Works are derived from
+-- the sources and rebuilt whenever either is re-imported, but a decision you
+-- made is not derived from anything and must outlive that. Keys are stable
+-- because they come from the title and year, so a stored answer still names
+-- the same two films after a rebuild, and `rebuild` replays it.
+CREATE TABLE IF NOT EXISTS link_decision (
+    key_a       TEXT NOT NULL,
+    key_b       TEXT NOT NULL,
+    title_a     TEXT,
+    year_a      INTEGER,
+    title_b     TEXT,
+    year_b      INTEGER,
+    reason      TEXT,
+    confidence  REAL,
+    status      TEXT NOT NULL DEFAULT 'open',   -- open | merged | separate
+    created_at  TEXT NOT NULL,
+    resolved_at TEXT,
+    PRIMARY KEY (key_a, key_b)
+);
+
+CREATE INDEX IF NOT EXISTS idx_link_decision_status ON link_decision(status);
 
 CREATE TABLE IF NOT EXISTS work_source (
     source     TEXT NOT NULL,          -- tv | lb
@@ -195,7 +227,6 @@ CREATE TABLE IF NOT EXISTS work_source (
 );
 
 CREATE INDEX IF NOT EXISTS idx_work_source_work ON work_source(work_id);
-CREATE INDEX IF NOT EXISTS idx_work_alias_work  ON work_alias(work_id);
 
 -- Edits hang off the work, not off a TV.app track, so a film you only have
 -- on Letterboxd can still be rated and reviewed here.
@@ -286,6 +317,23 @@ CREATE TABLE IF NOT EXISTS lb_profile (
 );
 
 CREATE INDEX IF NOT EXISTS idx_lb_film_year ON lb_film(year);
+
+-- Posters for films that are not in TV.app, which therefore have no artwork
+-- of their own. Looked up by title and year at a poster service; the answer
+-- is kept so a title is never searched twice, including the misses.
+CREATE TABLE IF NOT EXISTS poster (
+    work_key   TEXT PRIMARY KEY,
+    service    TEXT NOT NULL,          -- tmdb
+    remote_id  TEXT,
+    remote_path TEXT,
+    title      TEXT,
+    year       INTEGER,
+    status     TEXT NOT NULL,          -- ok | none | error
+    detail     TEXT,
+    fetched_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_poster_status ON poster(status);
 
 CREATE TABLE IF NOT EXISTS sync_run (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -382,6 +430,15 @@ def connect(path: Path) -> sqlite3.Connection:
             "DROP TABLE IF EXISTS lb_list;"
             "DROP TABLE IF EXISTS lb_list_film;"
             "DROP TABLE IF EXISTS lb_profile;"
+            "DROP TABLE IF EXISTS work_alias;"
+            "DROP TABLE IF EXISTS letterboxd_entry;"
+            "DROP TABLE IF EXISTS link_question;"
+            # work, work_title and work_source are derived from the two
+            # sources and are rebuilt; link_decision and work_override are
+            # not, and stay.
+            "DROP TABLE IF EXISTS work_title;"
+            "DROP TABLE IF EXISTS work_source;"
+            "DROP TABLE IF EXISTS work;"
         )
     conn.executescript(SCHEMA)
     _add_missing_columns(conn)
@@ -530,26 +587,43 @@ def load_file(conn: sqlite3.Connection, json_path: Path) -> dict:
 # Identity and bookkeeping are not the user's to rewrite.
 NON_EDITABLE = {"id", "persistent_id", "library_index", "position"}
 
-# Fields that exist only here: TV.app has no notion of them, so they live in
-# the override store like any other edit, and never collide with an import.
+# Fields that exist only here: neither source has a notion of them, so they
+# live in the override store like any other edit.
 USER_FIELDS = {"review": "markdown"}
 
-EDITABLE_FIELDS = (
+# Fields a film gets from Letterboxd. An override shadows these exactly as it
+# shadows TV.app's, so a rating or a watchlist flag can be corrected here
+# without the export being touched.
+LETTERBOXD_FIELDS = {
+    "rating": "integer",        # 0-100, twenty points a star
+    "watchlisted": "integer",
+    "liked": "integer",
+    "tags": "text",
+    "lb_watched_date": "text",
+}
+
+EDITABLE_FIELDS = sorted(set(
     [col for _, col, _ in COLUMNS if col not in NON_EDITABLE]
-    + sorted(USER_FIELDS)
-)
+    + list(LETTERBOXD_FIELDS) + list(USER_FIELDS)
+))
 _COLUMN_TYPES = {col: typ for _, col, typ in COLUMNS}
 
 
 def coerce(field: str, text: str | None):
-    """Turn a stored override string back into the column's own type."""
+    """Turn a stored override string back into that field's own type.
+
+    Consults every field the app knows, not just TV.app's columns: a
+    Letterboxd-backed flag stored as "0" must come back as the number 0, since
+    the string "0" is true and would invert the meaning of every such flag.
+    """
     if text is None or text == "":
         return None
-    declared = _COLUMN_TYPES.get(field, "TEXT")
+    declared = (_COLUMN_TYPES.get(field) or "").upper()
+    kind = (LETTERBOXD_FIELDS.get(field) or USER_FIELDS.get(field) or "")
     try:
-        if declared.startswith("INTEGER"):
+        if declared.startswith("INTEGER") or kind == "integer":
             return int(float(text))
-        if declared.startswith("REAL"):
+        if declared.startswith("REAL") or kind == "real":
             return float(text)
     except (TypeError, ValueError):
         return None
@@ -655,5 +729,6 @@ def field_types() -> dict[str, str]:
             kinds[col] = "real"
         else:
             kinds[col] = "text"
+    kinds.update(LETTERBOXD_FIELDS)
     kinds.update(USER_FIELDS)
     return kinds

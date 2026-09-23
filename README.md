@@ -143,6 +143,49 @@ One subtlety worth recording, since it is not obvious from the export: the
 one per viewing. Films and entries are therefore separate tables, and entries
 are tied back by title and year like any other source.
 
+### The titles table
+
+Every name any source has used for a film is kept in `work_title`: TV.app's
+spelling, Letterboxd's, the alternate title in parentheses, whatever a list
+called it. An incoming title is looked up against all of them, so a film found
+once under any name is found again under all of them — `A Prophet` and
+`Un prophète` reach the same work.
+
+### When it is not sure, it asks
+
+Derivation joins what is certain: one work known solely to TV.app, another
+solely to Letterboxd, the same title, years within two. Beyond that the
+evidence gets thin — `Damsel` 2018 and 2024 are different films, while
+`Batman Returns` filed under 1997 and 1992 is plainly one — so rather than
+guess or stay silent, the app raises a question and shows both sides with
+enough detail to settle it: director, runtime, genre, rating, other names.
+
+Answers are stored in `link_decision`, keyed by work key rather than row id.
+Works are derived and rebuilt whenever either source is re-imported; a
+decision is not derived from anything and must outlive that. Keys are stable
+because they come from title and year, so a stored answer still names the same
+two films after a rebuild, and `rebuild` replays it. Either answer is kept, so
+a pair is never raised twice.
+
+## Posters
+
+Films that are not in TV.app have no artwork, and a Letterboxd export contains
+no images. `movieslists posters` looks them up at TMDb by title and year.
+
+This is the only part of the app that uses the network, and it is off until
+you configure a key:
+
+```sh
+# a free key from https://www.themoviedb.org/settings/api
+echo YOUR_KEY > ~/.config/movieslists/tmdb.key
+movieslists posters --status
+movieslists posters
+```
+
+The key is read from that file or `TMDB_API_KEY`, never from a command-line
+flag, since an argument ends up in shell history. Every lookup is recorded
+including the misses, so a title is searched once and not again.
+
 ## Two machines, one shared folder
 
 Edits are shared across machines; the cached library is not. That split is
@@ -158,7 +201,7 @@ So the two kinds of data live in different places:
 | | Where | Why |
 | --- | --- | --- |
 | `item`, `sync_run`, `library_change` | local, `~/.local/share/movieslists/` | derived from *this* machine's TV.app, and regenerated on every start |
-| Overrides, reviews, ratings, Letterboxd log | the shared folder | exists nowhere else |
+| Overrides, reviews, ratings, link decisions | the shared folder | exists nowhere else |
 
 The shared side is a directory of small JSON documents, one per film, each
 field stamped with when it changed. That shape buys three things a shared

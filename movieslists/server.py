@@ -30,8 +30,10 @@ def attach_sharing(store, shared_dir=None) -> None:
     _SHARED_STORE = store
 GZIP_MIN_BYTES = 1024
 ART_ROUTE = re.compile(r"^/art/(thumb|full)/(\d+)\.jpg$")
+POSTER_ROUTE = re.compile(r"^/art/poster/(thumb|full)/(.+)\.jpg$")
 WORK_ROUTE = re.compile(r"^/api/work/([^/]+)$")
 OVERRIDE_ROUTE = re.compile(r"^/api/work/([^/]+)/override$")
+LIKE_ROUTE = re.compile(r"^/api/work/([^/]+)/like$")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -91,6 +93,11 @@ class Handler(BaseHTTPRequestHandler):
         if art:
             return self.send_artwork(art.group(1), int(art.group(2)))
 
+        poster = POSTER_ROUTE.match(path)
+        if poster:
+            from urllib.parse import unquote
+            return self.send_poster(poster.group(1), unquote(poster.group(2)))
+
         work = WORK_ROUTE.match(path)
         if work:
             from urllib.parse import unquote
@@ -107,9 +114,11 @@ class Handler(BaseHTTPRequestHandler):
             conn = self._read()
             try:
                 if path == "/api/library":
-                    return self.send_json(
-                        queries.library(conn, artwork.have(self.database))
-                    )
+                    from . import posters
+                    return self.send_json(queries.library(
+                        conn, artwork.have(self.database),
+                        posters.have(self.database),
+                    ))
                 if path == "/api/directors":
                     return self.send_json({"directors": queries.directors(conn)})
                 if path == "/api/stats":
@@ -125,6 +134,10 @@ class Handler(BaseHTTPRequestHandler):
                     })
                 if path == "/api/artwork":
                     return self.send_json(artwork.summary(self.database))
+                if path == "/api/questions":
+                    from . import works
+                    return self.send_json({"questions": works.questions(conn),
+                                           "stats": works.stats(conn)})
             finally:
                 conn.close()
             return self.send_json({"error": "no such endpoint"}, status=404)
@@ -138,6 +151,24 @@ class Handler(BaseHTTPRequestHandler):
         if override:
             from urllib.parse import unquote
             return self.set_overrides(unquote(override.group(1)))
+
+        liked = LIKE_ROUTE.match(path)
+        if liked:
+            from urllib.parse import unquote
+            return self.set_like(unquote(liked.group(1)))
+
+        if path == "/api/questions/answer":
+            from . import works
+            body = self._body()
+            if "id" not in body or "same" not in body:
+                raise ValueError("expected 'id' and 'same'")
+            conn = self._write()
+            try:
+                result = works.answer(conn, str(body["id"]), bool(body["same"]))
+                result["remaining"] = len(works.questions(conn))
+            finally:
+                conn.close()
+            return self.send_json(result)
 
         if path == "/api/changes/ack":
             body = self._body()
@@ -205,6 +236,25 @@ class Handler(BaseHTTPRequestHandler):
             conn.close()
         return self.send_json({"ok": True, "item": detail})
 
+    def set_like(self, key: str):
+        """Like or unlike a film. Stored as an override, like any other edit,
+        so Letterboxd's own value is left as it was exported."""
+        body = self._body()
+        conn = self._write()
+        try:
+            detail = queries.work_detail(conn, key)
+            if detail is None:
+                return self.send_json({"error": "no such film"}, status=404)
+            wanted = body.get("liked")
+            if wanted is None:                      # no value given: toggle
+                wanted = not bool(detail["effective"].get("liked"))
+            db.set_override(conn, key, "liked", 1 if wanted else 0)
+            detail = queries.work_detail(conn, key)
+        finally:
+            conn.close()
+        return self.send_json({"ok": True, "liked": bool(detail["effective"].get("liked")),
+                               "item": detail})
+
     def send_artwork(self, size: str, item_id: int):
         full_dir, thumb_dir = artwork.paths(self.database)
         source = (thumb_dir if size == "thumb" else full_dir) / f"{item_id}.jpg"
@@ -212,6 +262,18 @@ class Handler(BaseHTTPRequestHandler):
             source = full_dir / f"{item_id}.jpg"   # thumbnail not built yet
         if not source.is_file():
             return self.send_json({"error": "no artwork"}, status=404)
+        self.send_body(source.read_bytes(), "image/jpeg",
+                       cache="private, max-age=86400")
+
+    def send_poster(self, size: str, work_key: str):
+        from . import posters
+        full_dir, thumb_dir = posters.poster_dirs(self.database)
+        name = f"{posters._safe(work_key)}.jpg"
+        source = (thumb_dir if size == "thumb" else full_dir) / name
+        if size == "thumb" and not source.exists():
+            source = full_dir / name
+        if not source.is_file():
+            return self.send_json({"error": "no poster"}, status=404)
         self.send_body(source.read_bytes(), "image/jpeg",
                        cache="private, max-age=86400")
 

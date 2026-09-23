@@ -460,8 +460,8 @@ main {
 
 .seg:focus-visible { outline: 2px solid var(--accent); outline-offset: -1px; }
 
-.seg .seg-count {
-  margin-left: 6px;
+.seg .seg-count, .scope .seg-count {
+  margin-left: 7px;
   color: var(--faint);
   font-variant-numeric: tabular-nums;
   font-weight: 500;
@@ -568,6 +568,8 @@ main {
   text-transform: uppercase; letter-spacing: .04em; vertical-align: 1px;
 }
 
+/* One- and two-letter badges need a little more room to stay legible. */
+.tag-lb, .tag-review { padding-inline: 5px; min-width: 14px; text-align: center; }
 .tag-lb    { background: #1e3226; color: #6fd08c; }
 .tag-watch { background: #2e2a16; color: #d9c168; }
 
@@ -601,3 +603,67 @@ main {
 }
 
 .history li { margin: 3px 0; }
+
+/* ---------- link questions ---------- */
+
+.banner--ask { background: #1b2a33; color: #bcd9e8; border-bottom-color: #26404f; }
+
+.question {
+  margin: 0 0 14px; padding: 13px 15px;
+  background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.question-why {
+  color: var(--faint); font-size: 11px; font-weight: 650;
+  text-transform: uppercase; letter-spacing: .05em; margin-bottom: 9px;
+}
+
+.side { padding: 7px 0; border-top: 1px solid var(--border); }
+.side:first-of-type { border-top: 0; }
+
+.side-label {
+  color: var(--muted); font-size: 11px; font-weight: 600; margin-bottom: 2px;
+}
+
+.side-title { font-weight: 600; }
+.side-bits { color: var(--muted); font-size: 11.5px; margin-top: 2px; }
+
+.question-actions {
+  display: flex; gap: 8px; margin-top: 11px;
+  border-top: 1px solid var(--border); padding-top: 11px;
+}
+
+/* ---------- scope button ---------- */
+
+.scope {
+  appearance: none;
+  font: inherit;
+  font-weight: 550;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 7px 13px;
+  cursor: pointer;
+  white-space: nowrap;
+  min-width: 118px;
+  text-align: left;
+}
+
+.scope:hover { background: var(--hover); }
+.scope:focus-visible { outline: 2px solid var(--accent); outline-offset: -1px; }
+
+/* Anything but "All" is a filter, and says so. */
+.scope.is-filtered {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.scope.is-filtered .seg-count { color: var(--accent); opacity: .75; }
+
+/* A poster is portrait where TV.app's still is landscape; keep the row
+   height and let the narrower image sit centred in the same cell. */
+.art--poster { width: 28px; height: 41px; object-fit: cover; margin: 0 22px; }
+.hero--poster { aspect-ratio: auto; max-height: 340px; object-fit: contain; background: #0d0d0f; }

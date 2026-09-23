@@ -466,6 +466,40 @@ def cmd_doctor(args) -> int:
     return 1 if problems else 0
 
 
+def cmd_posters(args) -> int:
+    from . import posters
+
+    database = _database(args)
+    if not database.exists():
+        print(f"error: no library cache at {database}\nrun 'movieslists sync' first.",
+              file=sys.stderr)
+        return 1
+
+    if args.status:
+        for key, value in posters.summary(database).items():
+            print(f"{key:>15}: {value}")
+        if not posters.api_key():
+            print(f"\nno TMDb key yet. Get a free one at\n"
+                  f"  https://www.themoviedb.org/settings/api\n"
+                  f"then: echo YOUR_KEY > {posters.KEY_FILE}")
+        return 0
+
+    def progress(done, total, counts):
+        print(f"  {done}/{total}  found {counts['found']}, "
+              f"no poster {counts['missing']}, errors {counts['errors']}")
+
+    try:
+        result = posters.fetch(database, limit=args.limit, refresh=args.refresh,
+                               progress=progress)
+    except RuntimeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(f"looked up {result['looked_up']}: found {result['found']}, "
+          f"no poster {result['missing']}, errors {result['errors']}; "
+          f"{result['remaining']} still to do")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="movieslists",
@@ -550,6 +584,20 @@ def build_parser() -> argparse.ArgumentParser:
                       help="apply the retention policy without taking one")
     snap.add_argument("--reason", default="manual", help="note stored in the snapshot")
     snap.set_defaults(func=cmd_snapshot)
+
+    pos = sub.add_parser(
+        "posters",
+        help="fetch posters for films that are not in TV.app",
+        description="Films known only to Letterboxd have no artwork, so "
+                    "posters are looked up at TMDb by title and year. This is "
+                    "the only part of the app that uses the network, and it "
+                    "needs a free TMDb key.",
+    )
+    pos.add_argument("--limit", type=int, default=None, help="stop after this many")
+    pos.add_argument("--refresh", action="store_true",
+                     help="look up titles that previously found nothing")
+    pos.add_argument("--status", action="store_true", help="report what is cached")
+    pos.set_defaults(func=cmd_posters)
 
     doc = sub.add_parser("doctor", help="check for sync and integrity problems")
     doc.set_defaults(func=cmd_doctor)
