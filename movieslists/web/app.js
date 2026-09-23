@@ -833,29 +833,6 @@ function filmLabel(film) {
   return `${name} <span class="muted">(${film.year})</span>`;
 }
 
-function fieldControl(key, label, type, eff, imported, over) {
-  const overridden = Object.prototype.hasOwnProperty.call(over, key);
-  let value = state.dirty.has(key) ? state.dirty.get(key) : (eff[key] ?? '');
-  if (value === 0 && ZERO_IS_BLANK.has(key)) value = '';
-  const control = type === 'textarea'
-    ? `<textarea data-field="${key}" rows="${key === 'review' ? 8 : 4}"`
-      + ` placeholder="${key === 'review' ? 'Markdown: **bold**, *italic*, # heading, - list, > quote' : ''}"`
-      + `>${escapeHTML(value)}</textarea>`
-      + (key === 'review'
-          ? `<div class="md-preview" id="reviewPreview">${renderMarkdown(value)}</div>` : '')
-    : `<input data-field="${key}" type="${type === 'number' ? 'number' : 'text'}" value="${escapeHTML(value)}">`;
-  const note = overridden
-    ? `<div class="field-note"><span class="imported">imported: ${
-         imported[key] == null || imported[key] === ''
-         || (imported[key] === 0 && ZERO_IS_BLANK.has(key))
-         ? '—' : escapeHTML(imported[key])
-       }</span><button data-revert="${key}">revert</button></div>`
-    : '';
-  return `<div class="field${overridden ? ' is-overridden' : ''}">`
-    + `<label>${escapeHTML(label)}${overridden ? '<span class="tag-edited">edited</span>' : ''}</label>`
-    + control + note + '</div>';
-}
-
 function sourceSummary(detail) {
   const tv = detail.sources.tv || [];
   const lb = detail.sources.letterboxd || [];
@@ -921,7 +898,7 @@ function fieldControl(key, label, type, eff, imported, over) {
       + ` placeholder="${key === 'review' ? 'Markdown: **bold**, *italic*, # heading, - list, > quote' : ''}"`
       + `>${escapeHTML(value)}</textarea>`
       + (key === 'review'
-          ? `<div class="md-preview" id="reviewPreview">${renderMarkdown(value)}</div>` : '')
+          ? '<div class="md-preview" id="reviewPreview"></div>' : '')
     : `<input data-field="${key}" type="${type === 'number' ? 'number' : 'text'}" value="${escapeHTML(value)}">`;
   const source = imported[key];
   const note = overridden
@@ -988,9 +965,6 @@ function renderItemDetail() {
     + sourceSummary(d)
     + lookupLinks(eff)
     + lists
-    + (eff.review
-        ? `<div class="review"><h3 class="review-head">Review</h3>`
-          + `<div class="md">${renderMarkdown(eff.review)}</div></div>` : '')
     + (eff.long_description ? `<p class="blurb">${escapeHTML(eff.long_description)}</p>` : '')
     + viewingHistory(d.entries)
     + `<div class="section-head"><h3>Edit</h3>`
