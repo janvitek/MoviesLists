@@ -19,6 +19,15 @@ from urllib.parse import parse_qs, urlparse
 from . import artwork, db, queries
 
 WEB_ROOT = Path(__file__).with_name("web")
+
+# Set by the CLI when sharing is configured, so edits made in the browser are
+# mirrored to the shared store like any other write.
+_SHARED_STORE = None
+
+
+def attach_sharing(store, shared_dir=None) -> None:
+    global _SHARED_STORE
+    _SHARED_STORE = store
 GZIP_MIN_BYTES = 1024
 ART_ROUTE = re.compile(r"^/art/(thumb|full)/(\d+)\.jpg$")
 ITEM_ROUTE = re.compile(r"^/api/item/(\d+)$")
@@ -40,7 +49,10 @@ class Handler(BaseHTTPRequestHandler):
         return conn
 
     def _write(self) -> sqlite3.Connection:
-        return db.connect(self.database)
+        conn = db.connect(self.database)
+        if _SHARED_STORE is not None:
+            db.attach_store(_SHARED_STORE)
+        return conn
 
     def _body(self) -> dict:
         length = int(self.headers.get("Content-Length") or 0)

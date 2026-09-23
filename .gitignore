@@ -1,3 +1,8 @@
 __pycache__/
 *.pyc
 .DS_Store
+
+# User data and snapshots never belong in the repo.
+data/
+snapshots/
+*.sqlite3

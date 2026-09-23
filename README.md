@@ -106,6 +106,111 @@ items marked played, 942 carry a date. Where no date exists the list shows the
 date the item was added instead, in italics, so a derived date is never
 mistaken for a real viewing.
 
+## Two machines, one shared folder
+
+Edits are shared across machines; the cached library is not. That split is
+deliberate, and the reason is worth stating plainly: **a SQLite database must
+not live in a synced folder.** SQLite coordinates writers with POSIX advisory
+locks, which do not cross machines, and a sync service can copy a database
+mid-write or carry a WAL file out of step with its main file. The result is a
+corrupt database rather than a lost edit. A lock file cannot rescue that
+either, since the lock travels by the same sync service as the data.
+
+So the two kinds of data live in different places:
+
+| | Where | Why |
+| --- | --- | --- |
+| `item`, `sync_run`, `library_change` | local, `~/.local/share/movieslists/` | derived from *this* machine's TV.app, and regenerated on every start |
+| Overrides, reviews, ratings, Letterboxd log | the shared folder | exists nowhere else |
+
+The shared side is a directory of small JSON documents, one per film, each
+field stamped with when it changed. That shape buys three things a shared
+database cannot:
+
+- two machines editing **different fields of the same film** both keep their
+  work, because the merge is per field rather than per file;
+- a sync collision damages one film, not the library;
+- everything is plain text, so a bad merge can be read and repaired by hand.
+
+Removals are recorded as tombstones rather than simply vanishing — otherwise
+the next merge would see the field still present on the other machine and
+helpfully restore what you deleted.
+
+```sh
+movieslists config --shared-dir ~/Dropbox/MoviesLists   # once per machine
+movieslists share                                       # merge on demand
+movieslists doctor                                      # check for trouble
+```
+
+`serve` merges on startup, so ordinarily you never run `share` yourself.
+
+### About the lock
+
+There is a lock file, and it is a **courtesy, not a guarantee**. It serialises
+the ordinary case — two machines you are actually using — and leaves a record
+of who was writing when something goes wrong. It cannot do more than that: the
+lock travels by the same sync service as the data, so two machines can briefly
+hold it at once, and a machine that is offline sees no lock at all. A lock held
+for more than two minutes is presumed abandoned and taken over.
+
+The real safety is the store's shape. A lost race costs one field, not the
+library.
+
+`movieslists doctor` checks the things a synced folder gets wrong: a database
+that has wandered into the synced folder, sync-conflict files
+(`… (conflicted copy).json`), a stale lock, and SQLite integrity.
+
+## Snapshots
+
+```sh
+movieslists snapshot                    # take one now
+movieslists snapshot --list
+movieslists snapshot --restore NAME
+```
+
+A snapshot holds the shared edits plus a copy of the local database, taken
+through SQLite's backup API rather than a file copy, so it is safe to take
+while the app is running and can never capture a half-written page. `serve`
+takes one on startup, before this machine changes anything.
+
+Retention is tiered rather than a flat count: every snapshot from the last 24,
+then one per day for 30 days, then one per week for a year. The oldest
+snapshot is never pruned.
+
+Restoring writes the edits back into the shared store; the cached library is
+left alone unless you pass `--restore-database`, since it is rebuilt from
+TV.app anyway.
+
+## Letterboxd
+
+Letterboxd's API is invite-only and explicitly closed to personal projects, so
+the route is the account data export from
+<https://letterboxd.com/user/exportdata/>. Nothing is sent anywhere — you
+download the ZIP, this reads it locally.
+
+```sh
+movieslists letterboxd ~/Downloads/letterboxd-export.zip --dry-run
+movieslists letterboxd ~/Downloads/letterboxd-export.zip
+movieslists letterboxd --queue
+```
+
+Reviews, ratings and watch dates are imported. Ratings convert exactly:
+Letterboxd's half-star scale is twenty points a star on TV.app's 0–100 scale,
+so 3.5 stars is 70.
+
+**Matching is the hard part.** A Letterboxd export identifies films by
+LetterboxdURI, tmdbID and imdbID; TV.app exposes none of the three, so title
+and year are the only common ground. Titles are folded to compare —
+accents stripped, and edition suffixes removed, so `Watchmen (Director's Cut)`
+matches `Watchmen` and `Sucker Punch (Extended Cut) (2011)` matches
+`Sucker Punch`. A title unique in the library may drift two years; a title
+shared by several films (`Oldboy` 2003 and 2013) may not.
+
+Anything short of a confident match is **queued rather than applied**, and
+`--queue` lists each one with its candidates. Watch dates only fill films
+TV.app never dated, unless you pass `--dates prefer-letterboxd`. An edit you
+made by hand is never overwritten by an import unless you pass `--force`.
+
 ## Layout
 
 ```
@@ -118,6 +223,9 @@ movieslists/
   artwork.py           art extraction, downscaling, thumbnails
   server.py            stdlib HTTP server and JSON API
   cli.py               command line
+  letterboxd.py        Letterboxd export parsing and matching
+  sharing.py           shared store, cross-machine merge, locking
+  snapshots.py         snapshots, retention, restore
   web/                 the UI
 ```
 

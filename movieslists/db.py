@@ -14,7 +14,7 @@ import sqlite3
 from pathlib import Path
 
 # Bumped whenever the column set changes; a mismatch rebuilds the cache.
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 # (JSON key from extract.js, SQL column, SQL type). Order defines the table.
 COLUMNS: list[tuple[str, str, str]] = [
@@ -103,8 +103,37 @@ CREATE TABLE IF NOT EXISTS item_override (
     field         TEXT NOT NULL,
     value         TEXT,              -- NULL means "overridden to empty"
     updated_at    TEXT NOT NULL,
+    source        TEXT NOT NULL DEFAULT 'manual',   -- manual | letterboxd
     PRIMARY KEY (persistent_id, field)
 );
+
+-- One row per entry read from a Letterboxd export, with how it was matched.
+-- Entries that could not be matched with confidence sit here as 'queued'
+-- until confirmed, so a fuzzy guess never silently rewrites a film.
+CREATE TABLE IF NOT EXISTS letterboxd_entry (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    imported_at    TEXT NOT NULL,
+    letterboxd_uri TEXT,
+    tmdb_id        TEXT,
+    imdb_id        TEXT,
+    title          TEXT NOT NULL,
+    year           INTEGER,
+    directors      TEXT,
+    rating         REAL,             -- 0.5-5 as Letterboxd records it
+    review         TEXT,
+    watched_date   TEXT,
+    rewatch        INTEGER,
+    tags           TEXT,
+    status         TEXT NOT NULL,    -- applied | queued | rejected | unmatched
+    item_id        INTEGER,
+    persistent_id  TEXT,
+    confidence     REAL,
+    match_reason   TEXT,
+    candidates     TEXT,             -- JSON: candidate item ids for the queue
+    UNIQUE (letterboxd_uri, title, year)
+);
+
+CREATE INDEX IF NOT EXISTS idx_lb_status ON letterboxd_entry(status);
 
 -- What each import changed relative to the one before it.
 CREATE TABLE IF NOT EXISTS library_change (
@@ -210,13 +239,25 @@ def connect(path: Path) -> sqlite3.Connection:
     if existing and version != SCHEMA_VERSION:
         # The column set changed; the cache is disposable, so rebuild it.
         conn.executescript(
-            # item_override is NOT dropped: those are the user's edits.
+            # item_override and letterboxd_entry are NOT dropped: those hold
+            # the user's own work, not cached library data.
             "DROP TABLE IF EXISTS item_director;"
             "DROP TABLE IF EXISTS item;"
         )
     conn.executescript(SCHEMA)
+    _add_missing_columns(conn)
     conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     return conn
+
+
+def _add_missing_columns(conn: sqlite3.Connection) -> None:
+    """Widen user-data tables in place rather than rebuilding them."""
+    have = {r[1] for r in conn.execute("PRAGMA table_info(item_override)")}
+    if "source" not in have:
+        conn.execute(
+            "ALTER TABLE item_override ADD COLUMN source TEXT NOT NULL "
+            "DEFAULT 'manual'"
+        )
 
 
 # Fields that churn on their own and would bury real changes: playback
@@ -394,19 +435,53 @@ def overrides_for(conn: sqlite3.Connection, persistent_id: str) -> dict:
     }
 
 
+# When sharing is configured, every override write is mirrored into the
+# shared store so another machine can pick it up. Set via attach_store().
+_STORE = None
+
+
+def attach_store(store) -> None:
+    """Mirror override writes into a shared store (or None to stop)."""
+    global _STORE
+    _STORE = store
+
+
 def set_override(conn: sqlite3.Connection, persistent_id: str, field: str,
-                 value) -> None:
+                 value, source: str = "manual") -> None:
     """Shadow one field. The imported value is left untouched."""
     if field not in EDITABLE_FIELDS:
         raise ValueError(f"{field!r} is not an editable field")
+    stamp = _now_iso()
     with conn:
         conn.execute(
-            "INSERT INTO item_override (persistent_id, field, value, updated_at) "
-            "VALUES (?, ?, ?, datetime('now')) "
+            "INSERT INTO item_override (persistent_id, field, value, updated_at, "
+            "source) VALUES (?, ?, ?, ?, ?) "
             "ON CONFLICT(persistent_id, field) DO UPDATE SET "
-            "value = excluded.value, updated_at = excluded.updated_at",
-            (persistent_id, field, None if value is None else str(value)),
+            "value = excluded.value, updated_at = excluded.updated_at, "
+            "source = excluded.source",
+            (persistent_id, field, None if value is None else str(value),
+             stamp, source),
         )
+    if _STORE is not None:
+        _STORE.stamp(persistent_id, field, value, source)
+
+
+def _now_iso() -> str:
+    """UTC ISO-8601, the same spelling the shared store writes.
+
+    Both sides must agree on the format or the merge cannot order them.
+    """
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+
+
+def override_sources(conn: sqlite3.Connection, persistent_id: str) -> dict[str, str]:
+    return {
+        row[0]: row[1] for row in conn.execute(
+            "SELECT field, source FROM item_override WHERE persistent_id = ?",
+            (persistent_id,),
+        )
+    }
 
 
 def clear_override(conn: sqlite3.Connection, persistent_id: str,
@@ -422,6 +497,10 @@ def clear_override(conn: sqlite3.Connection, persistent_id: str,
                 "DELETE FROM item_override WHERE persistent_id = ? AND field = ?",
                 (persistent_id, field),
             )
+    # A removal is recorded in the shared store rather than simply vanishing,
+    # or the next merge would restore it from the other machine.
+    if _STORE is not None:
+        _STORE.forget(persistent_id, field)
     return cur.rowcount
 
 

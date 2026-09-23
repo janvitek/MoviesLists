@@ -13,6 +13,45 @@ def _database(args) -> Path:
     return Path(args.database).expanduser()
 
 
+def _shared(args):
+    """The shared store, or None when sharing has not been configured."""
+    from . import sharing
+
+    root = sharing.shared_root(getattr(args, "shared_dir", None))
+    return sharing.SharedStore(root) if root else None
+
+
+def _attach_and_merge(conn, args, quiet: bool = False):
+    """Hook the shared store up and merge before doing anything else.
+
+    Every command that reads or writes edits goes through here, so a machine
+    always acts on the newest state it can see rather than its own stale copy.
+    """
+    from . import db, sharing
+
+    store = _shared(args)
+    if store is None:
+        return None
+    db.attach_store(store)
+
+    stale = store.conflicts()
+    if stale and not quiet:
+        print(f"warning: {len(stale)} sync-conflict file(s) in {store.root}; "
+              f"run 'movieslists doctor' to look at them", file=sys.stderr)
+    try:
+        with sharing.lock(store.root, purpose="merge"):
+            counts = sharing.reconcile(conn, store)
+    except sharing.LockBusy as exc:
+        print(f"warning: {exc}\n  continuing without merging", file=sys.stderr)
+        return store
+    if not quiet and (counts["pulled"] or counts["deleted_locally"]):
+        print(f"merged from other machines: {counts['pulled']} edits in, "
+              f"{counts['deleted_locally']} removed"
+              + (f", {counts['conflicts_resolved']} conflicting fields resolved "
+                 f"by recency" if counts["conflicts_resolved"] else ""))
+    return store
+
+
 def cmd_sync(args) -> int:
     from . import sync as sync_module
 
@@ -68,6 +107,30 @@ def cmd_serve(args) -> int:
     from . import server, sync as sync_module
 
     database = _database(args)
+
+    # Pick up other machines' edits, and snapshot before this machine starts
+    # changing anything.
+    store = None
+    if database.exists():
+        import sqlite3
+
+        from . import db as db_module
+        conn = db_module.connect(database)
+        conn.row_factory = sqlite3.Row
+        try:
+            store = _attach_and_merge(conn, args)
+        finally:
+            conn.close()
+        if store is not None and not args.no_snapshot:
+            from . import snapshots
+            try:
+                archive = snapshots.take(store.root, database, reason="serve")
+                removed = snapshots.prune(store.root)
+                print(f"snapshot {archive.name}"
+                      + (f" ({len(removed)} older pruned)" if removed else ""))
+            except OSError as exc:
+                print(f"warning: could not snapshot: {exc}", file=sys.stderr)
+
     # Starting the app re-imports, so the library on screen is current and
     # anything that changed since last time gets reported up front.
     if not args.no_sync:
@@ -88,6 +151,8 @@ def cmd_serve(args) -> int:
               file=sys.stderr)
         return 1
 
+    if store is not None:
+        server.attach_sharing(store, getattr(args, "shared_dir", None))
     server.serve(database, host=args.host, port=args.port,
                  open_browser=not args.no_browser)
     return 0
@@ -146,6 +211,271 @@ def cmd_artwork(args) -> int:
     return 0
 
 
+WANTED_CHOICES = {"reviews": "review", "ratings": "rating", "dates": "played_date"}
+
+
+def cmd_letterboxd(args) -> int:
+    import sqlite3
+
+    from . import db, letterboxd
+
+    database = _database(args)
+    if not database.exists():
+        print(f"error: no library cache at {database}\nrun 'movieslists sync' first.",
+              file=sys.stderr)
+        return 1
+
+    conn = db.connect(database)
+    conn.row_factory = sqlite3.Row
+    _attach_and_merge(conn, args)
+    try:
+        if args.status:
+            for key, value in letterboxd.status(conn).items():
+                print(f"{key:>16}: {value}")
+            return 0
+
+        if args.queue:
+            rows = letterboxd.queue(conn)
+            if not rows:
+                print("nothing queued")
+                return 0
+            print(f"{len(rows)} entries awaiting confirmation:\n")
+            for row in rows:
+                year = row["year"] or "----"
+                print(f"  [{row['id']}] {row['title']} ({year}) - {row['match_reason']}")
+                for item in row["candidate_items"]:
+                    print(f"        candidate {item['id']}: {item['name']} "
+                          f"({item['year'] or '----'})")
+            print("\nconfirm with: movieslists letterboxd --accept ENTRY:ITEM")
+            print("reject with:  movieslists letterboxd --reject ENTRY")
+            return 0
+
+        wanted = {WANTED_CHOICES[w] for w in args.include}
+
+        if args.accept:
+            entry_id, _, item_id = args.accept.partition(":")
+            result = letterboxd.resolve(conn, int(entry_id), int(item_id), wanted,
+                                        dates=args.dates)
+            print(f"applied to {result['item']['name']}: "
+                  f"{', '.join(result['fields']) or 'nothing new'}")
+            return 0
+
+        if args.reject:
+            letterboxd.resolve(conn, int(args.reject), None, wanted)
+            print("rejected")
+            return 0
+
+        if not args.export:
+            print("error: give the path to a Letterboxd export "
+                  "(.zip, folder or .csv), or use --queue / --status",
+                  file=sys.stderr)
+            return 1
+
+        try:
+            summary = letterboxd.import_export(
+                conn, Path(args.export), wanted, dates=args.dates,
+                force=args.force, dry_run=args.dry_run,
+            )
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+
+        head = "would apply" if args.dry_run else "applied"
+        print(f"read {summary['entries']} entries: {head} {summary['applied']}, "
+              f"queued {summary['queued']}, unmatched {summary['unmatched']}, "
+              f"skipped {summary['skipped']}")
+        if not args.dry_run:
+            print(f"wrote {summary['fields']} field overrides")
+        if args.verbose:
+            for row in summary["rows"]:
+                mark = {"applied": "ok", "queued": "??", "unmatched": "--",
+                        "skipped": "==" }.get(row["status"], "  ")
+                target = f" -> {row['matched']} ({row['matched_year']})" if row["matched"] else ""
+                print(f"  {mark} {row['title']} ({row['year'] or '----'}){target}"
+                      f"  [{row['reason']}]")
+        if summary["queued"]:
+            print(f"\n{summary['queued']} need confirmation: "
+                  "movieslists letterboxd --queue")
+        return 0
+    finally:
+        conn.close()
+
+
+def cmd_config(args) -> int:
+    from . import sharing
+
+    config = sharing.load_config()
+    if args.shared_dir:
+        root = Path(args.shared_dir).expanduser()
+        root.mkdir(parents=True, exist_ok=True)
+        config["shared_dir"] = str(root)
+        sharing.save_config(config)
+        print(f"shared store: {root}")
+        print("your edits, reviews and ratings will live here and merge across "
+              "machines.\nthe cached library stays local, since each machine "
+              "reads its own TV.app.")
+    if args.no_sharing:
+        config.pop("shared_dir", None)
+        sharing.save_config(config)
+        print("sharing disabled; edits stay on this machine")
+
+    device = sharing.device()
+    print(f"\nthis machine : {device['host']} ({device['id']})")
+    root = sharing.shared_root(getattr(args, "shared_dir", None))
+    print(f"shared store : {root or 'not configured'}")
+    print(f"database     : {_database(args)}")
+    return 0
+
+
+def cmd_share(args) -> int:
+    import sqlite3
+
+    from . import db, sharing
+
+    database = _database(args)
+    store = _shared(args)
+    if store is None:
+        print("error: no shared store configured.\n"
+              "  movieslists config --shared-dir ~/Dropbox/MoviesLists",
+              file=sys.stderr)
+        return 1
+    conn = db.connect(database)
+    conn.row_factory = sqlite3.Row
+    try:
+        db.attach_store(store)
+        with sharing.lock(store.root, purpose="share"):
+            counts = sharing.reconcile(conn, store)
+        for key, value in counts.items():
+            print(f"{key:>20}: {value}")
+    except sharing.LockBusy as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        conn.close()
+    return 0
+
+
+def cmd_snapshot(args) -> int:
+    from . import snapshots
+
+    store = _shared(args)
+    if store is None:
+        print("error: snapshots need a shared store.\n"
+              "  movieslists config --shared-dir ~/Dropbox/MoviesLists",
+              file=sys.stderr)
+        return 1
+    database = _database(args)
+
+    if args.list:
+        rows = snapshots.listing(store.root)
+        if not rows:
+            print("no snapshots yet")
+            return 0
+        for row in rows:
+            when = row["taken_at"].strftime("%Y-%m-%d %H:%M UTC") if row["taken_at"] else "?"
+            print(f"  {row['name']}  {when}  {row['bytes'] / 1000:.0f} KB")
+        print(f"\n{len(rows)} snapshots in {snapshots.snapshot_dir(store.root)}")
+        return 0
+
+    if args.restore:
+        archive = snapshots.snapshot_dir(store.root) / args.restore
+        if not archive.is_file():
+            print(f"error: no snapshot named {args.restore}", file=sys.stderr)
+            return 1
+        result = snapshots.restore(store.root, archive, database,
+                                   overrides_only=not args.restore_database)
+        print(f"restored edits for {result['films']} films")
+        if result.get("database_restored"):
+            print(f"restored the cached library too "
+                  f"(previous copy kept at {result['previous_database']})")
+        print("run 'movieslists share' to merge the restored edits back in")
+        return 0
+
+    if args.prune_only:
+        removed = snapshots.prune(store.root)
+        print(f"pruned {len(removed)} snapshots")
+        return 0
+
+    archive = snapshots.take(store.root, database, reason=args.reason)
+    removed = snapshots.prune(store.root)
+    print(f"wrote {archive.name} ({archive.stat().st_size / 1000:.0f} KB)")
+    if removed:
+        print(f"pruned {len(removed)} older snapshots")
+    return 0
+
+
+def cmd_doctor(args) -> int:
+    """Look for the things a synced folder gets wrong."""
+    import sqlite3
+
+    from . import db, sharing, snapshots
+
+    database = _database(args)
+    problems = 0
+
+    print(f"database     : {database}"
+          f"{'' if database.exists() else '   MISSING'}")
+    if database.exists():
+        conn = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
+        try:
+            check = conn.execute("PRAGMA integrity_check").fetchone()[0]
+            print(f"integrity    : {check}")
+            if check != "ok":
+                problems += 1
+            print(f"overrides    : "
+                  f"{conn.execute('SELECT COUNT(*) FROM item_override').fetchone()[0]}")
+        finally:
+            conn.close()
+
+    # A database living on the synced folder is the failure mode worth naming.
+    shared = sharing.shared_root(getattr(args, "shared_dir", None))
+    print(f"shared store : {shared or 'not configured'}")
+    if shared:
+        try:
+            database.resolve().relative_to(Path(shared).resolve())
+            print("  PROBLEM: the SQLite database is inside the synced folder.\n"
+                  "  A sync service can copy it mid-write and corrupt it. Move it\n"
+                  "  back with --database ~/.local/share/movieslists/library.sqlite3")
+            problems += 1
+        except ValueError:
+            print("  ok: the database is outside the synced folder")
+
+        store = sharing.SharedStore(shared)
+        conflicts = store.conflicts()
+        if conflicts:
+            problems += 1
+            print(f"  PROBLEM: {len(conflicts)} sync-conflict file(s):")
+            for path in conflicts[:10]:
+                print(f"    {path}")
+            print("  Each is another machine's version of the same film. Compare\n"
+                  "  with the original, keep what you want, then delete the copy.")
+        else:
+            print("  ok: no sync-conflict files")
+
+        held = sharing._read_lock(Path(shared) / sharing.LOCK_NAME)
+        if held:
+            age = sharing._lock_age(held)
+            stale = age is not None and age > sharing.LOCK_STALE_SECONDS
+            print(f"  lock held by {held.get('host')} (pid {held.get('pid')}), "
+                  f"{age:.0f}s old{'  STALE' if stale else ''}")
+            if stale:
+                print("  It will be taken over automatically on the next write.")
+        else:
+            print("  ok: no lock held")
+
+        records = store.read_all()
+        print(f"  films with edits: {len(records)}, "
+              f"fields: {sum(len(f) for f in records.values())}")
+        rows = snapshots.listing(shared)
+        newest = rows[0]["taken_at"].strftime("%Y-%m-%d %H:%M UTC") if rows and rows[0]["taken_at"] else "never"
+        print(f"  snapshots: {len(rows)}, newest {newest}")
+        if not rows:
+            print("  suggestion: take one with 'movieslists snapshot'")
+
+    print(f"\n{'no problems found' if not problems else str(problems) + ' problem(s) above'}")
+    return 1 if problems else 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="movieslists",
@@ -154,7 +484,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=__version__)
     parser.add_argument(
         "--database", default=DEFAULT_DATABASE,
-        help=f"library cache location (default: {DEFAULT_DATABASE})",
+        help=f"library cache location (default: {DEFAULT_DATABASE}). "
+             "Keep this OFF any synced folder.",
+    )
+    parser.add_argument(
+        "--shared-dir", default=None,
+        help="synced folder holding edits shared between machines "
+             "(default: whatever 'movieslists config' has set)",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -168,6 +504,8 @@ def build_parser() -> argparse.ArgumentParser:
                        help="do not open a browser window")
     serve.add_argument("--no-sync", action="store_true",
                        help="skip the import and serve the existing cache")
+    serve.add_argument("--no-snapshot", action="store_true",
+                       help="do not snapshot before starting")
     serve.set_defaults(func=cmd_serve)
 
     stats = sub.add_parser("stats", help="print a summary of the cache")
@@ -187,6 +525,58 @@ def build_parser() -> argparse.ArgumentParser:
                      help="re-encode cached images smaller and rebuild thumbnails")
     art.add_argument("--log", default=None, help="write per-item progress here")
     art.set_defaults(func=cmd_artwork)
+
+    lb = sub.add_parser(
+        "letterboxd",
+        help="import reviews, ratings and watch dates from a Letterboxd export",
+        description="Import a Letterboxd data export "
+                    "(https://letterboxd.com/user/exportdata/). Nothing is sent "
+                    "anywhere; the file is read locally.",
+    )
+    lb.add_argument("export", nargs="?",
+                    help="the export .zip, an unpacked folder, or a single .csv")
+    lb.add_argument("--include", nargs="+", choices=sorted(WANTED_CHOICES),
+                    default=["reviews", "ratings", "dates"],
+                    help="what to import (default: all three)")
+    lb.add_argument("--dates", choices=["fill-missing", "prefer-letterboxd"],
+                    default="fill-missing",
+                    help="'fill-missing' only dates films TV.app never dated "
+                         "(default); 'prefer-letterboxd' overrides TV.app's own")
+    lb.add_argument("--force", action="store_true",
+                    help="also overwrite edits you made by hand")
+    lb.add_argument("--dry-run", action="store_true",
+                    help="report what would happen, change nothing")
+    lb.add_argument("--verbose", action="store_true", help="list every entry")
+    lb.add_argument("--queue", action="store_true",
+                    help="list entries awaiting confirmation")
+    lb.add_argument("--accept", metavar="ENTRY:ITEM",
+                    help="confirm a queued entry against a library item")
+    lb.add_argument("--reject", metavar="ENTRY", help="discard a queued entry")
+    lb.add_argument("--status", action="store_true", help="summarise past imports")
+    lb.set_defaults(func=cmd_letterboxd)
+
+    cfg = sub.add_parser("config", help="show or change where shared edits live")
+    cfg.add_argument("--shared-dir", dest="shared_dir", default=None,
+                     help="synced folder to keep edits in, e.g. ~/Dropbox/MoviesLists")
+    cfg.add_argument("--no-sharing", action="store_true",
+                     help="stop sharing; edits stay on this machine")
+    cfg.set_defaults(func=cmd_config)
+
+    share = sub.add_parser("share", help="merge edits with the shared store now")
+    share.set_defaults(func=cmd_share)
+
+    snap = sub.add_parser("snapshot", help="snapshot edits and the database")
+    snap.add_argument("--list", action="store_true", help="list snapshots")
+    snap.add_argument("--restore", metavar="NAME", help="restore a snapshot")
+    snap.add_argument("--restore-database", action="store_true",
+                      help="with --restore, also put back the cached library")
+    snap.add_argument("--prune-only", action="store_true",
+                      help="apply the retention policy without taking one")
+    snap.add_argument("--reason", default="manual", help="note stored in the snapshot")
+    snap.set_defaults(func=cmd_snapshot)
+
+    doc = sub.add_parser("doctor", help="check for sync and integrity problems")
+    doc.set_defaults(func=cmd_doctor)
 
     return parser
 
