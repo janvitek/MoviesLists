@@ -263,33 +263,71 @@ def _work_rows(conn: sqlite3.Connection) -> list[dict]:
     )]
 
 
+def _name_index(conn: sqlite3.Connection) -> tuple[dict, dict]:
+    """Every name each work is known by, and who else answers to each name.
+
+    Matching on the primary title alone misses a film recorded under a second
+    name: Letterboxd's "A Prophet" and TV.app's "A Prophet (Un prophète)" are
+    one film, but their primary titles fold differently and never met.
+    """
+    names: dict[int, set[str]] = {}
+    holders: dict[str, set[int]] = {}
+    for work_id, normalized in conn.execute(
+        "SELECT work_id, normalized FROM work_title"
+    ):
+        names.setdefault(work_id, set()).add(normalized)
+        holders.setdefault(normalized, set()).add(work_id)
+    return names, holders
+
+
+def _counterparts(work: dict, others: dict[int, dict], names: dict,
+                  holders: dict) -> list[dict]:
+    """Works on the other side sharing any name with this one."""
+    found: dict[int, dict] = {}
+    for name in names.get(work["id"], ()):
+        for other_id in holders.get(name, ()):
+            if other_id != work["id"] and other_id in others:
+                found[other_id] = others[other_id]
+    return list(found.values())
+
+
 def unify_obvious(conn: sqlite3.Connection) -> int:
     """Join the pairs that are not really in doubt.
 
-    One work known solely to TV.app, another solely to Letterboxd, the same
-    title, and years close enough to be the same release recorded twice.
+    One work known solely to TV.app and one solely to Letterboxd that share a
+    name and agree on the year within a couple of years, each being the
+    other's only candidate. Anything less clear-cut becomes a question.
 
     The Letterboxd side survives, because where the two disagree it is the one
     that tends to be right: TV.app files Batman Returns under 1997 and
     Byzantium under 2009.
     """
-    by_title: dict[str, list[dict]] = {}
-    for row in _work_rows(conn):
-        by_title.setdefault(normalize_title(row["title"]), []).append(row)
+    names, holders = _name_index(conn)
+    rows = _work_rows(conn)
+    tv_side = {w["id"]: w for w in rows if (w["tv"] or 0) and not (w["lb"] or 0)}
+    lb_side = {w["id"]: w for w in rows if (w["lb"] or 0) and not (w["tv"] or 0)}
 
     merged = 0
-    for group in by_title.values():
-        if len(group) != 2:
+    for tv in list(tv_side.values()):
+        if tv["id"] not in tv_side:
+            continue                       # already folded away this pass
+        candidates = [c for c in _counterparts(tv, lb_side, names, holders)
+                      if c["id"] in lb_side]
+        if len(candidates) != 1:
             continue
-        tv = [w for w in group if (w["tv"] or 0) and not (w["lb"] or 0)]
-        lb = [w for w in group if (w["lb"] or 0) and not (w["tv"] or 0)]
-        if len(tv) != 1 or len(lb) != 1:
+        lb = candidates[0]
+        # It must be the only candidate in the other direction too.
+        back = [c for c in _counterparts(lb, tv_side, names, holders)
+                if c["id"] in tv_side]
+        if len(back) != 1 or back[0]["id"] != tv["id"]:
             continue
-        if tv[0]["year"] is None or lb[0]["year"] is None:
+        if tv["year"] is None or lb["year"] is None:
             continue
-        if abs(tv[0]["year"] - lb[0]["year"]) > AUTO_YEAR_SLACK:
+        if abs(tv["year"] - lb["year"]) > AUTO_YEAR_SLACK:
             continue
-        merge(conn, lb[0]["id"], tv[0]["id"], "year-drift")
+        merge(conn, lb["id"], tv["id"], "shared title")
+        tv_side.pop(tv["id"], None)
+        lb_side.pop(lb["id"], None)
         merged += 1
     return merged
 
@@ -303,31 +341,33 @@ def propose_questions(conn: sqlite3.Connection) -> int:
     answered = {
         (r[0], r[1]) for r in conn.execute("SELECT key_a, key_b FROM link_decision")
     }
+    names, holders = _name_index(conn)
     rows = _work_rows(conn)
-    tv_side = [w for w in rows if (w["tv"] or 0) and not (w["lb"] or 0)]
-    lb_side = [w for w in rows if (w["lb"] or 0) and not (w["tv"] or 0)]
-
-    by_norm: dict[str, list[dict]] = {}
-    for w in lb_side:
-        by_norm.setdefault(normalize_title(w["title"]), []).append(w)
+    tv_side = {w["id"]: w for w in rows if (w["tv"] or 0) and not (w["lb"] or 0)}
+    lb_side = {w["id"]: w for w in rows if (w["lb"] or 0) and not (w["tv"] or 0)}
 
     asked = 0
-    for tv in tv_side:
-        norm = normalize_title(tv["title"])
+    for tv in tv_side.values():
         candidates: list[tuple[float, dict, str]] = []
 
-        # Same name, a year apart by more than we would join on our own.
-        for lb in by_norm.get(norm, []):
+        # Sharing any known name, a year apart by more than we would join on
+        # our own.
+        for lb in _counterparts(tv, lb_side, names, holders):
             if tv["year"] is None or lb["year"] is None:
-                candidates.append((0.8, lb, "same title, one of them undated"))
-            else:
-                gap = abs(tv["year"] - lb["year"])
-                if AUTO_YEAR_SLACK < gap <= ASK_YEAR_SLACK:
-                    candidates.append((0.75, lb, f"same title, {gap} years apart"))
+                candidates.append((0.8, lb, "shared title, one of them undated"))
+                continue
+            gap = abs(tv["year"] - lb["year"])
+            if AUTO_YEAR_SLACK < gap <= ASK_YEAR_SLACK:
+                candidates.append((0.75, lb, f"shared title, {gap} years apart"))
+            elif gap <= AUTO_YEAR_SLACK:
+                # Close enough to join, but something stopped it -- usually
+                # more than one candidate. Worth asking about.
+                candidates.append((0.85, lb, "shared title, similar year"))
 
         # Nearly the same name, the same year.
         if not candidates and tv["year"] is not None:
-            for lb in lb_side:
+            norm = normalize_title(tv["title"])
+            for lb in lb_side.values():
                 if lb["year"] != tv["year"]:
                     continue
                 ratio = SequenceMatcher(None, norm,

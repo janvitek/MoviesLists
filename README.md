@@ -124,6 +124,12 @@ record written three years ago, so the two unify on the next import with
 nothing to confirm. `Watchmen (Director's Cut)` and Letterboxd's `Watchmen`
 both derive `watchmen-2009`.
 
+Matching uses every name in the titles table, not just each film's primary
+one. Letterboxd's `A Prophet` and TV.app's `A Prophet (Un prophète)` fold
+differently and would never have met on their primary titles alone; sharing
+any known name is enough. Two works are joined without asking only when each
+is the other's sole candidate and the years agree within two.
+
 Derivation cannot cover everything — TV.app files `12 (2007)` under 2009 while
 Letterboxd says 2007 — so a key *decided* to mean an existing work is recorded
 as an alias, and that decision holds for every later import. Year drift is
