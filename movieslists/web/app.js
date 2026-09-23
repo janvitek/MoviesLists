@@ -134,7 +134,12 @@ const cellOrDash = (v) => (v ? `<div class="cell">${escapeHTML(v)}</div>` : dash
 const badges = (row) => (row.sources === 'lb'
     ? '<span class="tag-lb" title="on Letterboxd; not in your TV.app library">LB</span>'
     : '')
-  + (row.watchlisted ? '<span class="tag-watch" title="on your watchlist">WATCH</span>' : '')
+  + (row.liked
+      ? `<span class="tag-heart" data-clearflag="liked" data-key="${escapeHTML(row.key)}"`
+        + ` title="liked — click to unlike">\u2665</span>` : '')
+  + (row.watchlisted
+      ? `<span class="tag-watch" data-clearflag="watchlisted" data-key="${escapeHTML(row.key)}"`
+        + ` title="on your watchlist — click to remove">WATCH</span>` : '')
   + (row.edited ? '<span class="tag-edited">edited</span>' : '')
   + (row.reviewed ? '<span class="tag-review" title="you wrote a review">R</span>' : '');
 const editedTag = badges;
@@ -778,6 +783,23 @@ function lookupLinks(eff) {
     `<a href="${href}" target="_blank" rel="noopener noreferrer">${name} \u2197</a>`).join('')}</div>`;
 }
 
+// Watchlist and liked come from Letterboxd but are yours to change; an edit
+// is an override and leaves the export alone.
+function flagToggles(eff) {
+  const liked = Boolean(eff.liked);
+  const listed = Boolean(eff.watchlisted);
+  return '<div class="flags">'
+    + `<button class="heart${liked ? ' is-on' : ''}" data-flag="liked" type="button" `
+    + `aria-pressed="${liked}" aria-label="${liked ? 'Liked' : 'Not liked'}" `
+    + `title="${liked ? 'Liked — click to unlike' : 'Click to like'}">`
+    + `${liked ? '\u2665' : '\u2661'}</button>`
+    + `<button class="flag${listed ? ' is-on' : ''}" data-flag="watchlisted" type="button" `
+    + `aria-pressed="${listed}" `
+    + `title="${listed ? 'On your watchlist — click to remove' : 'Click to add to your watchlist'}">`
+    + `Watchlist</button>`
+    + '</div>';
+}
+
 function starPicker(rating) {
   const filled = Math.round((rating || 0) / 20);
   let html = `<div class="stars stars--large" data-rate="detail">`;
@@ -973,6 +995,7 @@ function renderItemDetail() {
     + `<h2>${escapeHTML(eff.name ?? '')}</h2>`
     + `<p class="lede">${escapeHTML(bits.join(' \u00b7 '))}</p>`
     + starPicker(eff.rating)
+    + flagToggles(eff)
     + sourceSummary(d)
     + lookupLinks(eff)
     + lists
@@ -1016,6 +1039,23 @@ async function rate(row, stars) {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ fields: { rating: next } }),
   });
+  if (!response.ok) return;
+  const payload = await response.json();
+  patchRow(payload.item);
+  if (state.detail && state.detail.key === payload.item.key) {
+    state.detail = payload.item;
+    renderItemDetail();
+  }
+  renderRows();
+}
+
+async function setFlag(row, field, value) {
+  if (!row) return;
+  const route = field === 'liked' ? 'like' : 'watchlist';
+  const response = await fetch(
+    `api/work/${encodeURIComponent(row.key)}/${route}`,
+    { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(value === undefined ? {} : { value }) });
   if (!response.ok) return;
   const payload = await response.json();
   patchRow(payload.item);
@@ -1073,6 +1113,8 @@ function patchRow(detail) {
   }
   row.edited = Object.keys(detail.overrides).length > 0 ? 1 : 0;
   row.reviewed = detail.effective.review ? 1 : 0;
+  row.watchlisted = detail.effective.watchlisted ? 1 : 0;
+  row.liked = detail.effective.liked ? 1 : 0;
   state.shows = buildShows(state.episodes);
   state.directors = buildDirectors(state.items);
   applyFilters();
@@ -1182,6 +1224,11 @@ function wire() {
   }, { passive: true });
 
   $('rows').addEventListener('click', (e) => {
+    const clear = e.target.closest('[data-clearflag]');
+    if (clear) {
+      e.stopPropagation();
+      return void setFlag(state.byKey.get(clear.dataset.key), clear.dataset.clearflag, false);
+    }
     const star = e.target.closest('.star');
     if (star) {
       // Rating from the list should not also open the panel.
@@ -1210,6 +1257,10 @@ function wire() {
     const star = e.target.closest('.star, .clear-stars');
     if (star && state.detail) {
       return void rate(state.byKey.get(state.detail.key), Number(star.dataset.star));
+    }
+    const flag = e.target.closest('[data-flag]');
+    if (flag && state.detail) {
+      return void setFlag(state.byKey.get(state.detail.key), flag.dataset.flag);
     }
     const revert = e.target.dataset?.revert;
     if (revert) revertField(revert);

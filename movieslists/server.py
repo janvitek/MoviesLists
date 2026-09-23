@@ -33,7 +33,10 @@ ART_ROUTE = re.compile(r"^/art/(thumb|full)/(\d+)\.jpg$")
 POSTER_ROUTE = re.compile(r"^/art/poster/(thumb|full)/(.+)\.jpg$")
 WORK_ROUTE = re.compile(r"^/api/work/([^/]+)$")
 OVERRIDE_ROUTE = re.compile(r"^/api/work/([^/]+)/override$")
-LIKE_ROUTE = re.compile(r"^/api/work/([^/]+)/like$")
+# Both flags come from Letterboxd and both can be overridden here, so they
+# share a route. "like" and "watchlist" are the names the UI uses.
+FLAG_ROUTE = re.compile(r"^/api/work/([^/]+)/(like|watchlist)$")
+FLAG_FIELDS = {"like": "liked", "watchlist": "watchlisted"}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -153,10 +156,10 @@ class Handler(BaseHTTPRequestHandler):
             from urllib.parse import unquote
             return self.set_overrides(unquote(override.group(1)))
 
-        liked = LIKE_ROUTE.match(path)
-        if liked:
+        flag = FLAG_ROUTE.match(path)
+        if flag:
             from urllib.parse import unquote
-            return self.set_like(unquote(liked.group(1)))
+            return self.set_flag(unquote(flag.group(1)), FLAG_FIELDS[flag.group(2)])
 
         if path == "/api/questions/answer":
             from . import works
@@ -237,23 +240,24 @@ class Handler(BaseHTTPRequestHandler):
             conn.close()
         return self.send_json({"ok": True, "item": detail})
 
-    def set_like(self, key: str):
-        """Like or unlike a film. Stored as an override, like any other edit,
-        so Letterboxd's own value is left as it was exported."""
+    def set_flag(self, key: str, field: str):
+        """Set or clear a flag. Stored as an override like any other edit, so
+        Letterboxd's own value is left exactly as it was exported."""
         body = self._body()
         conn = self._write()
         try:
             detail = queries.work_detail(conn, key)
             if detail is None:
                 return self.send_json({"error": "no such film"}, status=404)
-            wanted = body.get("liked")
+            wanted = body.get("value", body.get(field))
             if wanted is None:                      # no value given: toggle
-                wanted = not bool(detail["effective"].get("liked"))
-            db.set_override(conn, key, "liked", 1 if wanted else 0)
+                wanted = not bool(detail["effective"].get(field))
+            db.set_override(conn, key, field, 1 if wanted else 0)
             detail = queries.work_detail(conn, key)
         finally:
             conn.close()
-        return self.send_json({"ok": True, "liked": bool(detail["effective"].get("liked")),
+        return self.send_json({"ok": True, "field": field,
+                               "value": bool(detail["effective"].get(field)),
                                "item": detail})
 
     def send_artwork(self, size: str, item_id: int):

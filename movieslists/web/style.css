@@ -669,3 +669,43 @@ main {
 .hero--poster { aspect-ratio: auto; max-height: 340px; object-fit: contain; background: #0d0d0f; }
 
 .src--tmdb { border-left-color: #8f7ad6; }
+
+/* ---------- flag toggles ---------- */
+
+.flags { display: flex; gap: 7px; margin: 0 0 14px; }
+
+.flag {
+  font: inherit; font-size: 12px; font-weight: 550;
+  color: var(--muted); background: var(--surface-2);
+  border: 1px solid var(--border); border-radius: 7px;
+  padding: 4px 11px; cursor: pointer;
+}
+
+.flag:hover { color: var(--text); border-color: var(--faint); }
+
+.flag.is-on {
+  background: var(--edited-soft); border-color: var(--edited); color: var(--edited);
+}
+
+.tag-watch { cursor: pointer; }
+.tag-watch:hover { filter: brightness(1.25); }
+
+/* ---------- like ---------- */
+
+.heart {
+  font: inherit; font-size: 17px; line-height: 1;
+  color: var(--faint); background: var(--surface-2);
+  border: 1px solid var(--border); border-radius: 7px;
+  padding: 3px 10px 5px; cursor: pointer;
+}
+
+.heart:hover { color: #ff7a9c; border-color: #ff7a9c; }
+
+.heart.is-on { color: #ff5c85; border-color: #5e2436; background: #2b1620; }
+
+.tag-heart {
+  display: inline-block; margin-left: 6px; color: #ff5c85;
+  font-size: 11px; cursor: pointer; vertical-align: 1px;
+}
+
+.tag-heart:hover { filter: brightness(1.3); }
