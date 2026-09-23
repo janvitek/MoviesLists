@@ -16,7 +16,7 @@
   --alert-bg: #2b1518;
   --alert-border: #5e2329;
   --shadow: 0 2px 6px rgba(0,0,0,.4), 0 16px 40px rgba(0,0,0,.5);
-  --row-height: 58px;
+  --row-height: 46px;
   color-scheme: dark;
 }
 
@@ -158,7 +158,7 @@ main {
   border-radius: 12px; background: var(--surface); overflow: hidden;
 }
 
-.listhead, .row { display: grid; align-items: center; gap: 14px; padding: 0 16px; }
+.listhead, .row { display: grid; align-items: center; gap: 12px; padding: 0 14px; }
 
 .listhead {
   height: 34px; border-bottom: 1px solid var(--border);
@@ -176,14 +176,14 @@ main {
 
 .cell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .title { font-weight: 550; }
-.sub { color: var(--muted); font-size: 11.5px; margin-top: 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sub { color: var(--muted); font-size: 11px; margin-top: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .muted { color: var(--muted); }
 .num { font-variant-numeric: tabular-nums; }
 .dash { color: var(--faint); }
 
 /* 16:9, which is the shape TV.app supplies. */
 .art {
-  width: 72px; height: 41px; border-radius: 4px;
+  width: 62px; height: 35px; border-radius: 3px;
   background: var(--surface-2); object-fit: cover; display: block;
 }
 
@@ -665,7 +665,7 @@ main {
 
 /* A poster is portrait where TV.app's still is landscape; keep the row
    height and let the narrower image sit centred in the same cell. */
-.art--poster { width: 28px; height: 41px; object-fit: cover; margin: 0 22px; }
+.art--poster { width: 24px; height: 35px; object-fit: cover; margin: 0 19px; }
 .hero--poster { aspect-ratio: auto; max-height: 340px; object-fit: contain; background: #0d0d0f; }
 
 .src--tmdb { border-left-color: #8f7ad6; }

@@ -3,7 +3,12 @@
 // ---------------------------------------------------------------- utilities
 
 const $ = (id) => document.getElementById(id);
-const ROW_HEIGHT = 58;
+// Read from the stylesheet rather than repeated here: the virtual list
+// positions rows by this number, so a value that disagreed with the CSS
+// would misplace every row on screen.
+const ROW_HEIGHT = Number.parseInt(
+  getComputedStyle(document.documentElement).getPropertyValue('--row-height'), 10
+) || 46;
 const OVERSCAN = 6;
 
 const dateFmt = new Intl.DateTimeFormat(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
