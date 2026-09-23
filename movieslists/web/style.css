@@ -767,3 +767,11 @@ main {
 /* A link that only searches, because no identifier is known for that film. */
 .lookup a.is-search { color: var(--muted); border-style: dashed; }
 .lookup a.is-search:hover { color: var(--accent); }
+
+.field-select {
+  width: 100%; font: inherit; color: var(--text); background: var(--surface-2);
+  border: 1px solid var(--border); border-radius: 7px; padding: 6px 9px;
+  cursor: pointer;
+}
+
+.field.is-overridden .field-select { border-color: var(--edited); }

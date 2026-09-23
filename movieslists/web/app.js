@@ -994,6 +994,23 @@ function fieldControl(key, label, type, eff, imported, over) {
   const overridden = Object.prototype.hasOwnProperty.call(over, key);
   let value = state.dirty.has(key) ? state.dirty.get(key) : (eff[key] ?? '');
   if (value === 0 && ZERO_IS_BLANK.has(key)) value = '';
+  const source = imported[key];
+  // Genre is a closed list: free text would put a typo in the filter menu,
+  // where it is indistinguishable from a real category.
+  if (key === 'genre') {
+    const options = ['<option value="">—</option>'].concat(
+      (state.genreVocabulary || []).map((g) =>
+        `<option value="${escapeHTML(g)}"${g === value ? ' selected' : ''}>${escapeHTML(g)}</option>`));
+    const note = overridden
+      ? `<div class="field-note"><span class="imported">from source: ${
+           source == null || source === '' ? '—' : escapeHTML(source)
+         }</span><button data-revert="${key}">revert</button></div>` : '';
+    return `<div class="field${overridden ? ' is-overridden' : ''}">`
+      + `<label>${escapeHTML(label)}${overridden ? '<span class="tag-edited">edited</span>' : ''}</label>`
+      + `<select data-field="${key}" class="field-select">${options.join('')}</select>`
+      + note + '</div>';
+  }
+
   const control = type === 'textarea'
     ? `<textarea data-field="${key}" rows="${key === 'review' ? 8 : 4}"`
       + ` placeholder="${key === 'review' ? 'Markdown: **bold**, *italic*, # heading, - list, > quote' : ''}"`
@@ -1001,7 +1018,6 @@ function fieldControl(key, label, type, eff, imported, over) {
       + (key === 'review'
           ? '<div class="md-preview" id="reviewPreview"></div>' : '')
     : `<input data-field="${key}" type="${type === 'number' ? 'number' : 'text'}" value="${escapeHTML(value)}">`;
-  const source = imported[key];
   const note = overridden
     ? `<div class="field-note"><span class="imported">from source: ${
          source == null || source === '' || (source === 0 && ZERO_IS_BLANK.has(key))
@@ -1339,6 +1355,10 @@ function wire() {
   });
 
   const body = $('detailBody');
+  body.addEventListener('change', (e) => {
+    const field = e.target.dataset?.field;
+    if (field && e.target.tagName === 'SELECT') markDirty(field, e.target.value);
+  });
   body.addEventListener('input', (e) => {
     const field = e.target.dataset?.field;
     if (!field) return;
@@ -1481,6 +1501,7 @@ async function boot() {
   state.stats = data.stats;
   state.editableFields = data.editable_fields || [];
   state.fieldTypes = data.field_types || {};
+  state.genreVocabulary = data.genres || [];
 
   const s = data.stats;
   $('subtitle').textContent =

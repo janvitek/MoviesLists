@@ -86,6 +86,20 @@ is recorded in `library_change`. Additions and edits are reported quietly.
 losing a film is the one change worth interrupting you for. Playlist position
 and playback scrub position are ignored as noise.
 
+### Genres
+
+The two sources use different vocabularies for the same idea — TV.app says
+`Sci-Fi & Fantasy` where TMDb says `Science Fiction` and `Fantasy` — and
+TV.app's is idiosyncratic besides, offering `Special Interest` and `Bollywood`
+but no Crime, Mystery or War. Since TMDb describes 98% of this library, its
+19 genres are the vocabulary, and everything is folded into them.
+
+Editing a genre picks from that list rather than typing: free text puts a typo
+in the filter menu, where it is indistinguishable from a real category. The
+API validates too, and answers a near miss with a suggestion —
+`'Dramaa' is not a genre. Did you mean 'Drama'?` — while `Action & Adventure`
+is accepted and stored as `Action`.
+
 ### Filtering and sorting
 
 A three-way toggle switches between **All**, **Played** and **Unplayed**, each

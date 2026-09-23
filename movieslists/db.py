@@ -721,6 +721,8 @@ def set_override(conn: sqlite3.Connection, work_key: str, field: str,
     """Shadow one field of a work. Every source's own values stay untouched."""
     if field not in EDITABLE_FIELDS:
         raise ValueError(f"{field!r} is not an editable field")
+    if field == "genre":
+        value = check_genre(value)
     stamp = _now_iso()
     with conn:
         conn.execute(
@@ -789,3 +791,75 @@ def field_types() -> dict[str, str]:
     kinds.update(LETTERBOXD_FIELDS)
     kinds.update(USER_FIELDS)
     return kinds
+
+
+# ------------------------------------------------------------------ genres
+#
+# TMDb's vocabulary, used for every film. TV.app's is idiosyncratic -- it has
+# "Special Interest" and "Bollywood" but no Crime, Mystery or War -- and the
+# two overlap awkwardly, TV.app's "Sci-Fi & Fantasy" spanning two of TMDb's.
+# Since TMDb describes 98% of this library, its list is the one worth keeping.
+GENRES = [
+    "Action", "Adventure", "Animation", "Comedy", "Crime", "Documentary",
+    "Drama", "Family", "Fantasy", "History", "Horror", "Music", "Mystery",
+    "Romance", "Science Fiction", "Thriller", "TV Movie", "War", "Western",
+]
+
+# TV.app's wording, for the few films TMDb has nothing for. Several of its
+# genres describe a shelf rather than a kind of film -- Classics, Foreign,
+# Independent, Special Interest -- and have no counterpart here; those fall
+# through to whatever TMDb says, which is usually something.
+GENRE_ALIASES = {
+    "action & adventure": "Action",
+    "adventure": "Adventure",
+    "sci-fi & fantasy": "Science Fiction",
+    "sci-fi": "Science Fiction",
+    "scifi": "Science Fiction",
+    "kids & family": "Family",
+    "kids": "Family",
+    "anime": "Animation",
+    "concert films": "Music",
+    "musicals": "Music",
+    "musical": "Music",
+    "music documentaries": "Documentary",
+    "nonfiction": "Documentary",
+    "biography": "Documentary",
+    "tv shows": "TV Movie",
+    "television": "TV Movie",
+    "short films": "TV Movie",
+}
+
+_GENRE_BY_FOLD = {g.lower(): g for g in GENRES}
+
+
+def canonical_genre(value: str | None) -> str | None:
+    """A source's wording mapped onto the vocabulary, or None if unknown."""
+    if not value:
+        return None
+    fold = value.strip().lower()
+    return _GENRE_BY_FOLD.get(fold) or GENRE_ALIASES.get(fold)
+
+
+def check_genre(value: str | None) -> str | None:
+    """Validate an edited genre, raising with a suggestion on a near miss.
+
+    The set is closed on purpose: a free-text genre puts a typo in the filter
+    menu, where it is indistinguishable from a real category.
+    """
+    if value is None or value == "":
+        return None
+    known = canonical_genre(value)
+    if known:
+        return known
+
+    from difflib import get_close_matches
+    candidates = get_close_matches(value.strip().lower(),
+                                   list(_GENRE_BY_FOLD) + list(GENRE_ALIASES),
+                                   n=1, cutoff=0.7)
+    if candidates:
+        suggestion = canonical_genre(candidates[0])
+        raise ValueError(f"{value!r} is not a genre. Did you mean {suggestion!r}?")
+    raise ValueError(
+        f"{value!r} is not one of the {len(GENRES)} genres. "
+        f"Use one of: {', '.join(GENRES)}"
+    )

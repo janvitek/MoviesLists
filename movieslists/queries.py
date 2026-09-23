@@ -93,9 +93,19 @@ def _tmdb_side(conn):
     }
 
 
-def _first(value):
-    """TMDb lists genres and directors comma separated, most telling first."""
-    return value.split(", ")[0] if value else None
+def _first_genre(value):
+    """TMDb lists genres comma separated, most telling first.
+
+    Mapped onto the app's vocabulary, so "Science Fiction" and TV.app's
+    "Sci-Fi & Fantasy" are one category rather than two.
+    """
+    if not value:
+        return None
+    for part in value.split(", "):
+        known = db.canonical_genre(part)
+        if known:
+            return known
+    return None
 
 
 def _lb_side(conn):
@@ -176,7 +186,10 @@ def library(conn: sqlite3.Connection, art_ids: set[int] | None = None,
             # TV.app's own field for the same reason.
             "year": ((f or {}).get("year") or title_year or (t or {}).get("year")
                      or work["year"] or m.get("year")),
-            "genre": (t or {}).get("genre") or _first(m.get("genres")),
+            # TMDb's genre first: it is the vocabulary everything is folded
+            # into, and it describes nearly the whole library.
+            "genre": (_first_genre(m.get("genres"))
+                      or db.canonical_genre((t or {}).get("genre"))),
             "director": (t or {}).get("director") or m.get("directors"),
             "media_kind": (t or {}).get("media_kind") or "movie",
             "show": (t or {}).get("show"),
@@ -230,6 +243,7 @@ def library(conn: sqlite3.Connection, art_ids: set[int] | None = None,
         "changes": change_summary(conn),
         "editable_fields": db.EDITABLE_FIELDS,
         "field_types": db.field_types(),
+        "genres": db.GENRES,
     }
 
 
@@ -375,7 +389,8 @@ def work_detail(conn: sqlite3.Connection, key: str) -> dict | None:
         "name": clean_name,
         "year": (film.get("year") or title_year or primary.get("year")
                  or work["year"] or tmdb.get("year")),
-        "genre": primary.get("genre") or _first(tmdb.get("genres")),
+        "genre": (_first_genre(tmdb.get("genres"))
+                  or db.canonical_genre(primary.get("genre"))),
         "director": primary.get("director") or tmdb.get("directors"),
         "media_kind": primary.get("media_kind") or "movie",
         "duration": (primary.get("duration")
