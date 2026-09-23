@@ -269,6 +269,18 @@ case — every real film has a director, so a match without one is usually a
 series that shares a title with something. `Squid Game` had matched "Squid
 Game: Making Season 2", `Band of Brothers` "The Making of 'Band of Brothers'".
 
+A series whose name also belongs to a real film escapes that test, because it
+does match a film and that film has a director: `Chernobyl` found the 2019
+Russian feature, `Big Little Lies` found something. What separates them is
+weight of evidence — the HBO series has 8,326 votes against the film's six,
+while a genuine film like `Icarus` has 858 against its namesake's none. The
+two populations are orders of magnitude apart, so a series is preferred only
+when it is at least five times better attested.
+
+An identified entry takes its genres from the series too, since the film it
+had matched was the wrong thing entirely — Adolescence was carrying
+"Documentary" from "The Real Adolescence: Our Killer Kids".
+
 An identified entry moves out of the film list and joins its series under
 Shows, merging with any episodes TV.app has of the same show. `media_kind` is
 an ordinary override, so a wrong call is one edit away from corrected.

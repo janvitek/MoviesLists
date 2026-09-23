@@ -852,6 +852,14 @@ GENRE_ALIASES = {
     "tv shows": "TV Movie",
     "television": "TV Movie",
     "short films": "TV Movie",
+    # TMDb's television list differs from its film one.
+    "action & adventure": "Action",
+    "sci-fi & fantasy": "Science Fiction",
+    "war & politics": "War",
+    "soap": "Drama",
+    "talk": "TV Movie",
+    "reality": "Documentary",
+    "news": "Documentary",
 }
 
 _GENRE_BY_FOLD = {g.lower(): g for g in GENRES}

@@ -27,6 +27,14 @@ from . import artwork, db, sharing
 
 SEARCH_URL = "https://api.themoviedb.org/3/search/movie"
 TV_SEARCH_URL = "https://api.themoviedb.org/3/search/tv"
+TV_DETAIL_URL = "https://api.themoviedb.org/3/tv"
+
+# A series is taken over a film of the same name only when it is this many
+# times better attested. The two populations are far apart -- a real film
+# outvotes its namesake series by orders of magnitude and vice versa -- so
+# the threshold only has to fall in the gap.
+SERIES_MARGIN = 5
+SERIES_MIN_VOTES = 20
 DETAIL_URL = "https://api.themoviedb.org/3/movie"
 IMAGE_BASE = "https://image.tmdb.org/t/p"
 FULL_SIZE, THUMB_SIZE = "w500", "w185"
@@ -164,8 +172,20 @@ def search_tv(title: str, key: str) -> dict | None:
                 "series_year": int(aired[:4]) if aired[:4].isdigit() else None,
                 "overview": first.get("overview") or None,
                 "poster_path": first.get("poster_path") or None,
+                "vote_count": first.get("vote_count") or 0,
             }
     return None
+
+
+def series_genres(series_id: str, key: str) -> str | None:
+    """The series' own genres, so a wrong film match stops supplying them."""
+    params = urllib.parse.urlencode({"api_key": key})
+    try:
+        payload = json.loads(_request(f"{TV_DETAIL_URL}/{series_id}?{params}"))
+    except Exception:
+        return None
+    names = [g["name"] for g in payload.get("genres") or [] if g.get("name")]
+    return ", ".join(names) or None
 
 
 def classify_television(database: Path, key: str | None = None,
@@ -203,22 +223,110 @@ def classify_television(database: Path, key: str | None = None,
                 continue
             if found:
                 counts["television"] += 1
-                conn.execute(
-                    "UPDATE tmdb_film SET media_type = 'tv', series_id = ?, "
-                    "series_name = ?, series_year = ?, overview = "
-                    "COALESCE(overview, ?), poster_path = COALESCE(poster_path, ?), "
-                    "fetched_at = ? WHERE work_key = ?",
-                    (found["series_id"], found["series_name"], found["series_year"],
-                     found["overview"], found["poster_path"], db._now_iso(),
-                     row["work_key"]))
-                if found["poster_path"]:
-                    download_poster(database, row["work_key"], found["poster_path"])
+                _record_series(conn, database, row["work_key"], found, token)
             else:
                 counts["still_unknown"] += 1
                 conn.execute(
                     "UPDATE tmdb_film SET media_type = 'unknown' WHERE work_key = ?",
                     (row["work_key"],))
             if n % 20 == 0:
+                conn.commit()
+                if progress:
+                    progress(n, len(rows), counts)
+            time.sleep(PAUSE_SECONDS)
+        conn.commit()
+        return counts
+    finally:
+        conn.close()
+
+
+def _record_series(conn, database: Path, work_key: str, found: dict,
+                   token: str) -> None:
+    """File an entry as television, taking its genres from the series.
+
+    The film match it had was the wrong thing entirely, so its genres were
+    too: Adolescence was carrying "Documentary" from "The Real Adolescence:
+    Our Killer Kids".
+    """
+    genres = series_genres(found["series_id"], token)
+    conn.execute(
+        "UPDATE tmdb_film SET media_type = 'tv', series_id = ?, series_name = ?, "
+        "series_year = ?, overview = COALESCE(?, overview), "
+        "genres = COALESCE(?, genres), poster_path = COALESCE(?, poster_path), "
+        "directors = NULL, fetched_at = ? WHERE work_key = ?",
+        (found["series_id"], found["series_name"], found["series_year"],
+         found["overview"], genres, found["poster_path"], db._now_iso(), work_key))
+    if found.get("poster_path"):
+        download_poster(database, work_key, found["poster_path"])
+
+
+def find_series_namesakes(database: Path, key: str | None = None,
+                          progress=None) -> dict:
+    """Catch the series that matched a film of the same name.
+
+    The earlier sweep relied on a missing director, which misses a series
+    whose name also belongs to a real film: "Chernobyl" found the 2019
+    Russian film, "Big Little Lies" found something. What separates them is
+    weight of evidence -- the HBO series has 8,326 votes against the film's
+    six, while a real film like Icarus has 858 against its namesake's none.
+    """
+    token = api_key(key)
+    if not token:
+        raise RuntimeError("no TMDb key configured")
+    from .letterboxd import normalize_title
+
+    conn = db.connect(database)
+    try:
+        rows = conn.execute(
+            "SELECT t.work_key, t.searched_title, w.title, w.year, "
+            "       COALESCE(t.vote_count, 0) AS film_votes "
+            "FROM tmdb_film t JOIN work w ON w.key = t.work_key "
+            # NULL as well as 'movie': rows written before the column
+            # existed matched a film and were never labelled.
+            "WHERE t.status = 'ok' "
+            "  AND (t.media_type = 'movie' OR t.media_type IS NULL) "
+            "  AND w.year IS NOT NULL "
+            "  AND NOT EXISTS (SELECT 1 FROM work_source s "
+            "                  WHERE s.work_id = w.id AND s.source = 'tv') "
+            "ORDER BY w.title COLLATE NOCASE"
+        ).fetchall()
+
+        counts = {"checked": 0, "television": 0}
+        for n, row in enumerate(rows, start=1):
+            counts["checked"] += 1
+            try:
+                params = urllib.parse.urlencode(
+                    {"api_key": token, "query": search_title(row["title"])})
+                results = json.loads(
+                    _request(f"{TV_SEARCH_URL}?{params}")).get("results", [])
+            except Exception:
+                continue
+
+            for candidate in results[:3]:
+                aired = (candidate.get("first_air_date") or "")[:4]
+                if not aired.isdigit():
+                    continue
+                if normalize_title(candidate.get("name") or "") != \
+                        normalize_title(row["title"]):
+                    continue
+                if abs(int(aired) - row["year"]) > 1:
+                    continue
+                votes = candidate.get("vote_count") or 0
+                if votes < SERIES_MIN_VOTES:
+                    break
+                if votes < max(SERIES_MIN_VOTES, row["film_votes"] * SERIES_MARGIN):
+                    break
+                _record_series(conn, database, row["work_key"], {
+                    "series_id": str(candidate.get("id")),
+                    "series_name": candidate.get("name"),
+                    "series_year": int(aired),
+                    "overview": candidate.get("overview") or None,
+                    "poster_path": candidate.get("poster_path") or None,
+                }, token)
+                counts["television"] += 1
+                break
+
+            if n % 50 == 0:
                 conn.commit()
                 if progress:
                     progress(n, len(rows), counts)

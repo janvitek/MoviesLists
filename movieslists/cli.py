@@ -556,6 +556,19 @@ def cmd_tmdb(args) -> int:
         print(f"checked {found['checked']} entries with no film match: "
               f"{found['television']} are television, "
               f"{found['still_unknown']} still unidentified")
+
+        def namesake_progress(done, total, counts):
+            print(f"  {done}/{total}  found {counts['television']}")
+
+        print("\nchecking films that share a name with a series ...")
+        try:
+            same = posters.find_series_namesakes(database,
+                                                 progress=namesake_progress)
+        except RuntimeError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        print(f"checked {same['checked']}: {same['television']} more are "
+              f"television")
         return 0
 
     def progress(done, total, counts):
