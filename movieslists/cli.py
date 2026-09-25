@@ -396,6 +396,27 @@ def cmd_letterboxd(args) -> int:
         conn.close()
 
 
+def cmd_export(args) -> int:
+    from . import lb_export
+
+    database = _database(args)
+    if not database.exists():
+        print(f"error: no library cache at {database}\nrun 'movieslists sync' first.",
+              file=sys.stderr)
+        return 1
+    output = Path(args.output) if args.output else None
+    result = lb_export.export(database, output)
+    if output:
+        print(f"wrote {result['entries']} entries to {output}")
+    else:
+        print(result["csv"], end="")
+        return 0
+    print(f"  {result['watches']} diary entries, {result['reviews']} reviews, "
+          f"{result['ratings']} ratings")
+    print(f"\nUpload at https://letterboxd.com/import/")
+    return 0
+
+
 def cmd_config(args) -> int:
     from . import sharing
 
@@ -736,6 +757,18 @@ def build_parser() -> argparse.ArgumentParser:
     lb.add_argument("--status", action="store_true",
                     help="summarise what has been imported and linked")
     lb.set_defaults(func=cmd_letterboxd)
+
+    lb_out = sub.add_parser(
+        "export",
+        help="export viewings, ratings and reviews for Letterboxd import",
+        description="Generate a CSV file in Letterboxd's import format "
+                    "containing diary entries logged here, reviews written "
+                    "here, and ratings that differ from what Letterboxd has. "
+                    "Upload it at https://letterboxd.com/import/.",
+    )
+    lb_out.add_argument("output", nargs="?", default=None,
+                        help="write the CSV here (default: print to stdout)")
+    lb_out.set_defaults(func=cmd_export)
 
     cfg = sub.add_parser("config", help="show or change where shared edits live")
     cfg.add_argument("--shared-dir", dest="shared_dir", default=None,

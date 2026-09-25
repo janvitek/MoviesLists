@@ -150,6 +150,12 @@ class Handler(BaseHTTPRequestHandler):
                             include_acknowledged=args.get("all", ["0"])[0] == "1",
                         ),
                     })
+                if path == "/api/export":
+                    from . import lb_export
+                    result = lb_export.export(self.database)
+                    body = result["csv"].encode("utf-8")
+                    self.send_body(body, "text/csv; charset=utf-8")
+                    return
                 if path == "/api/artwork":
                     return self.send_json(artwork.summary(self.database))
                 if path == "/api/watches":
@@ -165,18 +171,15 @@ class Handler(BaseHTTPRequestHandler):
                     return self.send_json({"results": posters.candidates(
                         query, int(year) if year and year.isdigit() else None)})
                 if path == "/api/tmdb/complete":
+                    from . import posters
                     args = parse_qs(parsed.query)
                     query = (args.get("q") or [""])[0].strip()
                     if len(query) < 2:
                         return self.send_json({"results": []})
-                    like = f"%{query}%"
-                    rows = conn.execute(
-                        "SELECT tmdb_id, title, popularity FROM tmdb_title "
-                        "WHERE title LIKE ? ORDER BY popularity DESC LIMIT 12",
-                        (like,)).fetchall()
-                    return self.send_json({"results": [
-                        {"tmdb_id": r[0], "title": r[1], "popularity": r[2]}
-                        for r in rows]})
+                    if not posters.api_key():
+                        return self.send_json({"results": []})
+                    return self.send_json({"results": posters.candidates(
+                        query, None)})
                 if path == "/api/questions":
                     from . import works
                     return self.send_json({"questions": works.questions(conn),
@@ -263,6 +266,22 @@ class Handler(BaseHTTPRequestHandler):
             finally:
                 conn.close()
             return self.send_json(result)
+
+        if path == "/api/reveal":
+            body = self._body()
+            pid = body.get("persistent_id")
+            if not pid:
+                raise ValueError("expected 'persistent_id'")
+            import subprocess
+            subprocess.run([
+                "osascript", "-e",
+                'tell application "TV"\n'
+                '  activate\n'
+                f'  play (first track whose persistent ID is "{pid}")\n'
+                '  pause\n'
+                'end tell',
+            ], capture_output=True, timeout=10)
+            return self.send_json({"ok": True})
 
         if path == "/api/changes/ack":
             body = self._body()

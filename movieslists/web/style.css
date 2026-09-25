@@ -327,6 +327,12 @@ main {
 }
 
 .star.is-on { color: var(--edited); }
+.star.is-half {
+  background: linear-gradient(90deg, var(--edited) 50%, var(--faint) 50%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
 .stars:hover .star { color: var(--muted); }
 .stars:hover .star:hover,
 .stars:hover .star:hover ~ .star { color: var(--faint); }

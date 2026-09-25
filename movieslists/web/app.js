@@ -202,13 +202,16 @@ const playsCell = (i) => `<div class="cell num muted">${
 // Every rating in the library imports as 0, so these are yours to set: a
 // click writes an override and leaves the imported value alone.
 function starCell(item) {
-  const filled = Math.round((item.rating || 0) / 20);
-  const title = filled
-    ? `${filled} of 5${item.lb_rating ? ` (Letterboxd: ${item.lb_rating})` : ''}`
+  const half = Math.round((item.rating || 0) / 10);  // 0-10 in half-stars
+  const display = half ? (half / 2).toString().replace(/\.0$/, '') : '';
+  const title = half
+    ? `${display} of 5${item.lb_rating ? ` (Letterboxd: ${item.lb_rating})` : ''}`
     : 'not rated';
   let html = `<div class="cell stars" data-rate="${escapeHTML(item.key)}" title="${title}">`;
   for (let n = 1; n <= 5; n++) {
-    html += `<span class="star${n <= filled ? ' is-on' : ''}" data-star="${n}">\u2605</span>`;
+    const full = n * 2 <= half;
+    const halfOn = n * 2 - 1 === half;
+    html += `<span class="star${full ? ' is-on' : halfOn ? ' is-half' : ''}" data-star="${n}" data-half="${n * 2 - 1}">\u2605</span>`;
   }
   return html + '</div>';
 }
@@ -634,9 +637,11 @@ function renderLogger(matches, tmdb, query = '', suggestions = null) {
   }).join('');
 
   const suggest = (suggestions || []).map((r) => {
-    return `<button class="found" data-adopt="${r.tmdb_id}" type="button">`
+    const bits = [r.year, r.overview ? r.overview.slice(0, 80) + '…' : null]
+      .filter(Boolean).join(' \u00b7 ');
+    return `<button class="found" data-adopt="${escapeHTML(r.tmdb_id)}" type="button">`
       + `<span class="found-title">${escapeHTML(r.title)}</span>`
-      + `<span class="found-bits muted">${r.popularity >= 10 ? 'popular' : ''}</span></button>`;
+      + `<span class="found-bits">${escapeHTML(bits)}</span></button>`;
   }).join('');
 
   const remote = (tmdb || []).map((r) => {
@@ -654,12 +659,9 @@ function renderLogger(matches, tmdb, query = '', suggestions = null) {
     + `value="${escapeHTML(query)}" autocomplete="off">`
     + (local ? `<div class="section-head"><h3>In your library</h3></div>${local}` : '')
     + (suggest ? `<div class="section-head"><h3>From TMDb</h3></div>${suggest}` : '')
-    + (query.trim().length > 1 && !suggest
-        ? `<div class="section-head"><h3>Not here?</h3>`
-          + `<button class="btn" id="searchTmdb" type="button">Search TMDb</button></div>`
-        : '')
-    + (remote ? `<div class="found-list">${remote}</div>` : '')
-    + (tmdb && !tmdb.length ? '<p class="muted">Nothing at TMDb for that.</p>' : '')
+    + (remote ? `<div class="section-head"><h3>From TMDb</h3></div><div class="found-list">${remote}</div>` : '')
+    + ((tmdb && !tmdb.length) || (suggestions && !suggestions.length)
+        ? '<p class="muted">Nothing at TMDb for that.</p>' : '')
     + `</div>`;
   const box = $('findFilm');
   if (box) {
@@ -906,12 +908,14 @@ function flagToggles(eff) {
 }
 
 function starPicker(rating) {
-  const filled = Math.round((rating || 0) / 20);
+  const half = Math.round((rating || 0) / 10);  // 0-10 in half-stars
   let html = `<div class="stars stars--large" data-rate="detail">`;
   for (let n = 1; n <= 5; n++) {
-    html += `<span class="star${n <= filled ? ' is-on' : ''}" data-star="${n}">\u2605</span>`;
+    const full = n * 2 <= half;
+    const halfOn = n * 2 - 1 === half;
+    html += `<span class="star${full ? ' is-on' : halfOn ? ' is-half' : ''}" data-star="${n}" data-half="${n * 2 - 1}">\u2605</span>`;
   }
-  return html + (filled ? ` <button class="clear-stars" data-star="0">clear</button>` : '') + '</div>';
+  return html + (half ? ` <button class="clear-stars" data-star="0">clear</button>` : '') + '</div>';
 }
 
 async function openDetail(row) {
@@ -975,8 +979,12 @@ function sourceSummary(detail) {
 
   if (tv.length) {
     const copies = tv.length > 1 ? ` (${tv.length} copies)` : '';
+    const pid = tv[0].persistent_id;
+    const reveal = pid
+      ? ` <button class="linkish" data-reveal="${escapeHTML(pid)}">open \u2197</button>`
+      : '';
     parts.push(`<div class="src src--tv"><span class="src-name">TV.app</span>`
-      + `<span class="src-detail">in your library${escapeHTML(copies)}</span></div>`);
+      + `<span class="src-detail">in your library${escapeHTML(copies)}${reveal}</span></div>`);
   }
   if (lb.length || entries.length) {
     const film = lb[0] || {};
@@ -1181,11 +1189,11 @@ function markDirty(field, value) {
 }
 
 // TV.app stores a rating as 0-100, twenty points per star.
-async function rate(row, stars) {
+async function rate(row, halfStars) {
   if (!row) return;
-  const current = Math.round((row.rating || 0) / 20);
-  // Clicking the star you are already on clears the rating.
-  const next = (stars === current || stars === 0) ? 0 : stars * 20;
+  const current = Math.round((row.rating || 0) / 10);  // current in half-stars
+  // Clicking the same value clears the rating.
+  const next = (halfStars === current || halfStars === 0) ? 0 : halfStars * 10;
   const response = await fetch(`api/work/${encodeURIComponent(row.key)}/override`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ fields: { rating: next } }),
@@ -1431,11 +1439,14 @@ function wire() {
     }
     const star = e.target.closest('.star');
     if (star) {
-      // Rating from the list should not also open the panel.
       e.stopPropagation();
       const holder = star.closest('[data-rate]');
       const row = state.byKey.get(holder.dataset.rate);
-      return void rate(row, Number(star.dataset.star));
+      // Left half of star = half star, right half = full star.
+      const rect = star.getBoundingClientRect();
+      const isLeftHalf = (e.clientX - rect.left) < rect.width / 2;
+      const halfStars = isLeftHalf ? Number(star.dataset.half) : Number(star.dataset.star) * 2;
+      return void rate(row, halfStars);
     }
     const showLike = e.target.closest('[data-showlike]');
     if (showLike) {
@@ -1472,11 +1483,27 @@ function wire() {
     }
   });
   body.addEventListener('click', (e) => {
+    const reveal = e.target.closest('[data-reveal]');
+    if (reveal) {
+      e.preventDefault();
+      e.stopPropagation();
+      const pid = reveal.dataset.reveal;
+      reveal.textContent = 'opening\u2026';
+      fetch('api/reveal', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ persistent_id: pid }),
+      }).then(() => { reveal.textContent = 'open \u2197'; });
+      return;
+    }
     if (e.target.id === 'saveEdits') return void saveEdits();
     if (e.target.id === 'revertAll') return void revertField(null);
     const star = e.target.closest('.star, .clear-stars');
     if (star && state.detail) {
-      return void rate(state.byKey.get(state.detail.key), Number(star.dataset.star));
+      if (star.dataset.star === '0') return void rate(state.byKey.get(state.detail.key), 0);
+      const rect = star.getBoundingClientRect();
+      const isLeftHalf = (e.clientX - rect.left) < rect.width / 2;
+      const halfStars = isLeftHalf ? Number(star.dataset.half) : Number(star.dataset.star) * 2;
+      return void rate(state.byKey.get(state.detail.key), halfStars);
     }
     const flag = e.target.closest('[data-flag]');
     if (flag && state.detail) {
@@ -1512,24 +1539,30 @@ function wire() {
 
   $('detailBody').addEventListener('input', debounce(async (e) => {
     if (e.target.id !== 'findFilm') return;
-    const q = e.target.value.trim().toLowerCase();
+    const raw = e.target.value;
+    const q = raw.trim().toLowerCase();
     const matches = q.length < 2 ? [] : state.items.filter((r) =>
       (r.name || '').toLowerCase().includes(q)).slice(0, 8);
-    // Also search the TMDb title index for instant suggestions.
-    let suggestions = null;
+    // Show local matches immediately.
+    renderLogger(matches, null, raw, null);
+    // Then fetch TMDb suggestions (the input is preserved by renderLogger).
     if (q.length >= 2) {
       try {
         const r = await fetch('api/tmdb/complete?q=' + encodeURIComponent(q));
         if (r.ok) {
           const data = await r.json();
-          // Filter out films already in the library.
-          suggestions = (data.results || []).filter(
-            (s) => !matches.some((m) => m.name.toLowerCase() === s.title.toLowerCase()));
+          // Only update if the input hasn't changed while we waited.
+          const box = $('findFilm');
+          if (box && box.value === raw) {
+            const suggestions = (data.results || []).filter(
+              (s) => !matches.some((m) => m.name.toLowerCase() === s.title.toLowerCase()
+                                       && m.year === s.year));
+            renderLogger(matches, null, raw, suggestions);
+          }
         }
       } catch (_) {}
     }
-    renderLogger(matches, null, e.target.value, suggestions);
-  }, 180));
+  }, 250));
 
   $('detailBody').addEventListener('click', async (e) => {
     const open = e.target.closest('[data-openkey]');
