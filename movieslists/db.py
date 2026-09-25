@@ -83,9 +83,10 @@ COLUMNS: list[tuple[str, str, str]] = [
 
 BOOLEAN_KEYS = {"bookmarkable", "enabled", "unplayed"}
 
+_ITEM_COLS = ',\n    '.join(f'{col} {typ}' for _, col, typ in COLUMNS)
 SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS item (
-    {',\n    '.join(f'{col} {typ}' for _, col, typ in COLUMNS)}
+    {_ITEM_COLS}
 );
 
 -- One row per credited director, so a co-directed film is reachable from
@@ -380,6 +381,24 @@ CREATE TABLE IF NOT EXISTS tmdb_film (
 
 CREATE INDEX IF NOT EXISTS idx_tmdb_status ON tmdb_film(status);
 
+-- TMDb metadata for TV shows in the TV.app library.  Keyed by the show
+-- name as TV.app spells it, since shows have no persistent ID of their own.
+CREATE TABLE IF NOT EXISTS tmdb_show (
+    show_name      TEXT PRIMARY KEY,
+    tmdb_id        TEXT,
+    name           TEXT,
+    original_name  TEXT,
+    year           INTEGER,
+    overview       TEXT,
+    genres         TEXT,
+    poster_path    TEXT,
+    vote_average   REAL,
+    vote_count     INTEGER,
+    number_of_seasons  INTEGER,
+    status         TEXT NOT NULL,      -- ok | none | error
+    fetched_at     TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS sync_run (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     synced_at   TEXT NOT NULL,
@@ -466,22 +485,19 @@ def connect(path: Path) -> sqlite3.Connection:
         "SELECT name FROM sqlite_master WHERE type='table' AND name='item'"
     ).fetchone()
     if existing and version > SCHEMA_VERSION:
-        # An older build must never touch a newer database. Left unguarded
-        # this is destructive rather than merely confusing: a server started
-        # before a schema bump sees the mismatch, takes the rebuild path, and
-        # drops the cached tables out from under the process that wrote them.
         raise RuntimeError(
             f"{path} was written by a newer version of MoviesLists "
             f"(schema {version}, this build understands {SCHEMA_VERSION}). "
             f"Restart with the current code rather than running two versions "
             f"against one database."
         )
+    if existing and version == SCHEMA_VERSION:
+        # Schema is current; create any new tables that were added without a
+        # version bump (IF NOT EXISTS makes this safe and fast).
+        _ensure_new_tables(conn)
+        return conn
     if existing and version < SCHEMA_VERSION:
-        # The column set changed; the cache is disposable, so rebuild it.
         conn.executescript(
-            # Caches are rebuilt; the user's own work is not. `item` comes
-            # back from TV.app and the lb_* tables from the export file, but
-            # work_override, work, work_alias and work_source stay put.
             "DROP TABLE IF EXISTS item_director;"
             "DROP TABLE IF EXISTS item;"
             "DROP TABLE IF EXISTS lb_diary;"
@@ -493,9 +509,6 @@ def connect(path: Path) -> sqlite3.Connection:
             "DROP TABLE IF EXISTS work_alias;"
             "DROP TABLE IF EXISTS letterboxd_entry;"
             "DROP TABLE IF EXISTS link_question;"
-            # work, work_title and work_source are derived from the two
-            # sources and are rebuilt; link_decision and work_override are
-            # not, and stay.
             "DROP TABLE IF EXISTS work_title;"
             "DROP TABLE IF EXISTS work_source;"
             "DROP TABLE IF EXISTS work;"
@@ -532,6 +545,35 @@ def _add_missing_columns(conn: sqlite3.Connection) -> None:
         for name, declaration in columns:
             if name not in have:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {declaration}")
+
+
+def _ensure_new_tables(conn: sqlite3.Connection) -> None:
+    """Create tables added after the current schema version was set."""
+    conn.execute("""CREATE TABLE IF NOT EXISTS tmdb_title (
+        tmdb_id     INTEGER PRIMARY KEY,
+        title       TEXT NOT NULL,
+        popularity  REAL NOT NULL DEFAULT 0
+    )""")
+    # Speed up prefix / substring searches the autocomplete uses.
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_tmdb_title_pop "
+        "ON tmdb_title(popularity DESC)"
+    )
+    conn.execute("""CREATE TABLE IF NOT EXISTS tmdb_show (
+        show_name      TEXT PRIMARY KEY,
+        tmdb_id        TEXT,
+        name           TEXT,
+        original_name  TEXT,
+        year           INTEGER,
+        overview       TEXT,
+        genres         TEXT,
+        poster_path    TEXT,
+        vote_average   REAL,
+        vote_count     INTEGER,
+        number_of_seasons  INTEGER,
+        status         TEXT NOT NULL,
+        fetched_at     TEXT NOT NULL
+    )""")
 
 
 # Fields that churn on their own and would bury real changes: playback

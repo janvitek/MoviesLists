@@ -112,6 +112,10 @@ const state = {
 
 // ------------------------------------------------------------------- views
 
+function safeName(name) {
+  return [...name].map(c => /[\w-]/.test(c) ? c : '_').join('').slice(0, 180);
+}
+
 // TV.app supplies 16:9 stills; a film it does not have falls back to a
 // portrait poster, so the cell holds either shape.
 function artCell(row) {
@@ -123,7 +127,33 @@ function artCell(row) {
   }
   const shape = row.has_art ? 'art' : 'art art--poster';
   return `<div class="cell"><img class="${shape}" src="${src}" alt="" `
-    + `loading="lazy" decoding="async" onerror="this.className='art art--empty'"></div>`;
+    + `decoding="async" onerror="this.className='art art--empty'"></div>`;
+}
+
+function showRatingCell(s) {
+  if (s.userRating) {
+    const stars = (s.userRating / 20).toString().replace(/\.0$/, '');
+    return `<div class="cell num">${stars}\u2605</div>`;
+  }
+  if (s.tmdbRating) {
+    return `<div class="cell num muted" title="TMDb average">${Number(s.tmdbRating).toFixed(1)}</div>`;
+  }
+  return dash();
+}
+
+function showArtCell(show) {
+  // Prefer TV.app episode art; fall back to TMDb show poster.
+  if (show.artId != null) {
+    return `<div class="cell"><img class="art" src="art/thumb/${show.artId}.jpg" alt="" `
+      + `decoding="async" onerror="this.className='art art--empty'"></div>`;
+  }
+  const safe = safeName(show.name);
+  if ((state.showPosters || new Set()).has(safe)) {
+    return `<div class="cell"><img class="art art--poster" `
+      + `src="art/show/thumb/${encodeURIComponent(safe)}.jpg" alt="" `
+      + `decoding="async" onerror="this.className='art art--empty'"></div>`;
+  }
+  return '<div class="cell"><div class="art art--empty" role="img" aria-label="no artwork"></div></div>';
 }
 
 const dash = () => '<div class="cell"><span class="dash">—</span></div>';
@@ -207,18 +237,20 @@ const VIEWS = {
   },
 
   shows: {
-    grid: '72px minmax(190px,3fr) 88px 78px minmax(96px,1.2fr) 140px',
-    columns: ['', 'Show', 'Episodes', 'Seasons', 'Genre', 'Last played'],
-    sortColumns: [null, 'name', 'episodes', 'seasons', 'genre', 'played_date'],
-    sortFields: ['name', 'episodes', 'seasons', 'watched', 'genre', 'played_date'],
+    grid: '72px minmax(190px,3fr) 88px 78px minmax(96px,1.2fr) 82px 50px 140px',
+    columns: ['', 'Show', 'Episodes', 'Seasons', 'Genre', 'Rating', '\u2665', 'Last played'],
+    sortColumns: [null, 'name', 'episodes', 'seasons', 'genre', 'rating', 'liked', 'played_date'],
+    sortFields: ['name', 'episodes', 'seasons', 'watched', 'genre', 'rating', 'liked', 'played_date'],
     defaultSort: [{ field: 'name', dir: 'asc' }],
     source: () => state.shows,
     cells: (s) => [
-      artCell({ tv_id: s.artId, has_art: s.artId != null, has_poster: 0 }),
+      showArtCell(s),
       `<div class="cell title">${escapeHTML(s.name)}<div class="sub">${s.watched} of ${s.episodes} watched</div></div>`,
       `<div class="cell num muted">${s.episodes}</div>`,
       `<div class="cell num muted">${s.seasons || '<span class="dash">—</span>'}</div>`,
       s.genre ? `<div class="cell"><span class="pill">${escapeHTML(s.genre)}</span></div>` : dash(),
+      showRatingCell(s),
+      `<div class="cell"><span class="heart${s.liked ? ' is-on' : ''}" data-showlike="${escapeHTML(s.name)}" title="${s.liked ? 'liked' : 'like'}">${s.liked ? '\u2665' : '\u2661'}</span></div>`,
       playedCell(s),
     ],
   },
@@ -233,7 +265,8 @@ function buildShows(items) {
     if (!item.show) continue;
     let g = groups.get(item.show);
     if (!g) {
-      g = { id: `show:${item.show}`, name: item.show, episodes: 0, watched: 0,
+      g = { key: `show:${item.show}`, id: `show:${item.show}`, name: item.show,
+            episodes: 0, watched: 0,
             seasonSet: new Set(), genres: new Map(), played_date: null,
             played_count: 0, years: [], media_kind: 'show', artId: null, artRank: Infinity };
       groups.set(item.show, g);
@@ -251,13 +284,21 @@ function buildShows(items) {
       if (rank < g.artRank) { g.artRank = rank; g.artId = item.tv_id; }
     }
   }
-  return [...groups.values()].map((g) => ({
-    ...g,
-    seasons: g.seasonSet.size,
-    genre: [...g.genres.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? null,
-    year: g.years.length ? Math.min(...g.years) : null,
-    director: null,
-  }));
+  const meta = state.showMeta || {};
+  return [...groups.values()].map((g) => {
+    const m = meta[g.name] || {};
+    return {
+      ...g,
+      seasons: g.seasonSet.size,
+      genre: [...g.genres.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? null,
+      year: g.years.length ? Math.min(...g.years) : null,
+      director: null,
+      tmdbRating: m.rating || null,
+      userRating: m.rating_override || null,
+      liked: m.liked || 0,
+      rating: m.rating_override || (m.rating ? Math.round(m.rating * 10) : 0),
+    };
+  });
 }
 
 // ----------------------------------------------------------- filter and sort
@@ -402,7 +443,10 @@ function setSort(field, additive) {
   render();
 }
 
-function renderRows() {
+let _lastStart = -1, _lastEnd = -1, _lastView = '', _forceRows = false;
+
+function renderRows(force) {
+  if (force) _forceRows = true;
   const scroller = $('scroller');
   const total = state.visible.length;
   $('sizer').style.height = `${total * ROW_HEIGHT}px`;
@@ -410,6 +454,9 @@ function renderRows() {
 
   const start = Math.max(0, Math.floor(scroller.scrollTop / ROW_HEIGHT) - OVERSCAN);
   const end = Math.min(total, start + Math.ceil(scroller.clientHeight / ROW_HEIGHT) + OVERSCAN * 2);
+
+  if (!_forceRows && start === _lastStart && end === _lastEnd && state.view === _lastView) return;
+  _lastStart = start; _lastEnd = end; _lastView = state.view; _forceRows = false;
 
   const view = VIEWS[state.view];
   const html = [];
@@ -444,7 +491,7 @@ function render() {
   renderSortBar();
   renderScopeToggle();
   $('scroller').scrollTop = 0;
-  renderRows();
+  renderRows(true);
   renderCount();
 }
 
@@ -576,12 +623,20 @@ function openLogger() {
   if (box) box.focus();
 }
 
-function renderLogger(matches, tmdb, query = '') {
+let _completionCache = null;
+
+function renderLogger(matches, tmdb, query = '', suggestions = null) {
   const local = matches.slice(0, 8).map((row) => {
     const bits = [row.year, row.director].filter(Boolean).join(' \u00b7 ');
     return `<button class="found" data-openkey="${escapeHTML(row.key)}" type="button">`
       + `<span class="found-title">${escapeHTML(row.name)}</span>`
       + `<span class="found-bits">${escapeHTML(bits)}</span></button>`;
+  }).join('');
+
+  const suggest = (suggestions || []).map((r) => {
+    return `<button class="found" data-adopt="${r.tmdb_id}" type="button">`
+      + `<span class="found-title">${escapeHTML(r.title)}</span>`
+      + `<span class="found-bits muted">${r.popularity >= 10 ? 'popular' : ''}</span></button>`;
   }).join('');
 
   const remote = (tmdb || []).map((r) => {
@@ -598,7 +653,8 @@ function renderLogger(matches, tmdb, query = '') {
     + `<input type="search" id="findFilm" class="find" placeholder="Title…" `
     + `value="${escapeHTML(query)}" autocomplete="off">`
     + (local ? `<div class="section-head"><h3>In your library</h3></div>${local}` : '')
-    + (query.trim().length > 1
+    + (suggest ? `<div class="section-head"><h3>From TMDb</h3></div>${suggest}` : '')
+    + (query.trim().length > 1 && !suggest
         ? `<div class="section-head"><h3>Not here?</h3>`
           + `<button class="btn" id="searchTmdb" type="button">Search TMDb</button></div>`
         : '')
@@ -646,11 +702,13 @@ function openQuestions() {
 }
 
 async function answerQuestion(id, same) {
+  const card = document.querySelector(`[data-question="${id}"]`);
+  if (card) card.style.opacity = '0.4';
   const response = await fetch('api/questions/answer', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ id, same }),
   });
-  if (!response.ok) return;
+  if (!response.ok) { if (card) card.style.opacity = ''; return; }
   state.questions = (state.questions || []).filter((q) => q.id !== id);
   renderQuestionBanner();
   renderQuestions();
@@ -961,7 +1019,7 @@ function viewingHistory(detail) {
   }));
   const theirs = (detail.entries || []).map((e) => ({
     when: e.watched_date || e.logged_date, rating: e.rating,
-    rewatch: e.rewatch, note: null, venue: null, id: null, own: false,
+    rewatch: e.rewatch, note: e.review || null, venue: null, id: null, own: false,
   }));
   const all = [...mine, ...theirs]
     .filter((v) => v.when)
@@ -1362,7 +1420,7 @@ function wire() {
   $('scroller').addEventListener('scroll', () => {
     if (ticking) return;
     ticking = true;
-    requestAnimationFrame(() => { renderRows(); ticking = false; });
+    requestAnimationFrame(() => { renderRows(false); ticking = false; });
   }, { passive: true });
 
   $('rows').addEventListener('click', (e) => {
@@ -1378,6 +1436,22 @@ function wire() {
       const holder = star.closest('[data-rate]');
       const row = state.byKey.get(holder.dataset.rate);
       return void rate(row, Number(star.dataset.star));
+    }
+    const showLike = e.target.closest('[data-showlike]');
+    if (showLike) {
+      e.stopPropagation();
+      const name = showLike.dataset.showlike;
+      fetch(`api/show/${encodeURIComponent(name)}/like`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: '{}',
+      }).then((r) => r.ok && r.json()).then((data) => {
+        if (!data) return;
+        const m = state.showMeta[name] || (state.showMeta[name] = {});
+        m.liked = data.value ? 1 : 0;
+        state.shows = buildShows(state.episodes);
+        render();
+      });
+      return;
     }
     const row = e.target.closest('.row');
     if (row) openDetail(state.visible[Number(row.dataset.index)]);
@@ -1436,12 +1510,25 @@ function wire() {
     render();
   });
 
-  $('detailBody').addEventListener('input', debounce((e) => {
+  $('detailBody').addEventListener('input', debounce(async (e) => {
     if (e.target.id !== 'findFilm') return;
     const q = e.target.value.trim().toLowerCase();
     const matches = q.length < 2 ? [] : state.items.filter((r) =>
       (r.name || '').toLowerCase().includes(q)).slice(0, 8);
-    renderLogger(matches, null, e.target.value);
+    // Also search the TMDb title index for instant suggestions.
+    let suggestions = null;
+    if (q.length >= 2) {
+      try {
+        const r = await fetch('api/tmdb/complete?q=' + encodeURIComponent(q));
+        if (r.ok) {
+          const data = await r.json();
+          // Filter out films already in the library.
+          suggestions = (data.results || []).filter(
+            (s) => !matches.some((m) => m.name.toLowerCase() === s.title.toLowerCase()));
+        }
+      } catch (_) {}
+    }
+    renderLogger(matches, null, e.target.value, suggestions);
   }, 180));
 
   $('detailBody').addEventListener('click', async (e) => {
@@ -1540,6 +1627,8 @@ async function boot() {
   state.items = unpack(data.columns, data.rows);
   state.episodes = unpack(data.columns, data.episodes || []);
   state.byKey = new Map(state.items.map((i) => [i.key, i]));
+  state.showPosters = new Set(data.show_posters || []);
+  state.showMeta = data.show_meta || {};
   state.shows = buildShows(state.episodes);
   state.stats = data.stats;
   state.editableFields = data.editable_fields || [];
@@ -1573,3 +1662,39 @@ boot().catch((err) => {
   $('empty').hidden = false;
   $('empty').textContent = `${err.message}. Run 'movieslists sync' and reload.`;
 });
+
+// Auto-refresh: poll for changes and update the list silently.
+(function autoRefresh() {
+  const INTERVAL = 10_000;
+  let lastCount = -1;
+  let polling = false;
+  async function poll() {
+    if (polling) return;
+    polling = true;
+    try {
+      const r = await fetch('api/stats');
+      if (!r.ok) return;
+      const stats = await r.json();
+      const sig = (stats.works || 0) + (stats.tmdb_described || 0);
+      if (lastCount >= 0 && sig !== lastCount) {
+        const lib = await fetch(`api/library${state.showDeleted ? '?deleted=1' : ''}`);
+        if (!lib.ok) return;
+        const data = await lib.json();
+        state.items = unpack(data.columns, data.rows);
+        state.episodes = unpack(data.columns, data.episodes || []);
+        state.byKey = new Map(state.items.map((i) => [i.key, i]));
+        state.showPosters = new Set(data.show_posters || []);
+        state.showMeta = data.show_meta || {};
+        state.shows = buildShows(state.episodes);
+        state.stats = data.stats;
+        state.deletedCount = data.deleted_count || 0;
+        render();
+      }
+      lastCount = sig;
+    } catch (_) {
+    } finally {
+      polling = false;
+    }
+  }
+  setInterval(poll, INTERVAL);
+})();

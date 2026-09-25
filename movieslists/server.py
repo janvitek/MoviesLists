@@ -31,12 +31,14 @@ def attach_sharing(store, shared_dir=None) -> None:
 GZIP_MIN_BYTES = 1024
 ART_ROUTE = re.compile(r"^/art/(thumb|full)/(\d+)\.jpg$")
 POSTER_ROUTE = re.compile(r"^/art/poster/(thumb|full)/(.+)\.jpg$")
+SHOW_POSTER_ROUTE = re.compile(r"^/art/show/(thumb|full)/(.+)\.jpg$")
 WORK_ROUTE = re.compile(r"^/api/work/([^/]+)$")
 OVERRIDE_ROUTE = re.compile(r"^/api/work/([^/]+)/override$")
 # Both flags come from Letterboxd and both can be overridden here, so they
 # share a route. "like" and "watchlist" are the names the UI uses.
 FLAG_ROUTE = re.compile(r"^/api/work/([^/]+)/(like|watchlist|delete)$")
 FLAG_FIELDS = {"like": "liked", "watchlist": "watchlisted", "delete": "deleted"}
+SHOW_FLAG_ROUTE = re.compile(r"^/api/show/([^/]+)/(like|rating)$")
 WATCH_ROUTE = re.compile(r"^/api/work/([^/]+)/watch$")
 WATCH_ID_ROUTE = re.compile(r"^/api/watch/([0-9a-f]{32})$")
 
@@ -104,6 +106,12 @@ class Handler(BaseHTTPRequestHandler):
             from urllib.parse import unquote
             return self.send_poster(poster.group(1), unquote(poster.group(2)))
 
+        show_poster = SHOW_POSTER_ROUTE.match(path)
+        if show_poster:
+            from urllib.parse import unquote
+            return self.send_show_poster(show_poster.group(1),
+                                         unquote(show_poster.group(2)))
+
         work = WORK_ROUTE.match(path)
         if work:
             from urllib.parse import unquote
@@ -122,9 +130,13 @@ class Handler(BaseHTTPRequestHandler):
                 if path == "/api/library":
                     from . import posters
                     args = parse_qs(parsed.query)
+                    show_poster_full, _ = posters.show_poster_dirs(self.database)
+                    show_posters = ({p.stem for p in show_poster_full.glob("*.jpg")}
+                                    if show_poster_full.is_dir() else set())
                     return self.send_json(queries.library(
                         conn, artwork.have(self.database),
                         posters.have(self.database),
+                        show_posters=show_posters,
                         include_deleted=args.get("deleted", ["0"])[0] == "1",
                     ))
                 if path == "/api/stats":
@@ -152,6 +164,19 @@ class Handler(BaseHTTPRequestHandler):
                     year = (args.get("year") or [None])[0]
                     return self.send_json({"results": posters.candidates(
                         query, int(year) if year and year.isdigit() else None)})
+                if path == "/api/tmdb/complete":
+                    args = parse_qs(parsed.query)
+                    query = (args.get("q") or [""])[0].strip()
+                    if len(query) < 2:
+                        return self.send_json({"results": []})
+                    like = f"%{query}%"
+                    rows = conn.execute(
+                        "SELECT tmdb_id, title, popularity FROM tmdb_title "
+                        "WHERE title LIKE ? ORDER BY popularity DESC LIMIT 12",
+                        (like,)).fetchall()
+                    return self.send_json({"results": [
+                        {"tmdb_id": r[0], "title": r[1], "popularity": r[2]}
+                        for r in rows]})
                 if path == "/api/questions":
                     from . import works
                     return self.send_json({"questions": works.questions(conn),
@@ -174,6 +199,12 @@ class Handler(BaseHTTPRequestHandler):
         if flag:
             from urllib.parse import unquote
             return self.set_flag(unquote(flag.group(1)), FLAG_FIELDS[flag.group(2)])
+
+        show_flag = SHOW_FLAG_ROUTE.match(path)
+        if show_flag:
+            from urllib.parse import unquote
+            return self.set_show_field(unquote(show_flag.group(1)),
+                                       show_flag.group(2))
 
         watch = WATCH_ROUTE.match(path)
         if watch:
@@ -341,6 +372,33 @@ class Handler(BaseHTTPRequestHandler):
                                "value": bool(detail["effective"].get(field)),
                                "item": detail})
 
+    def set_show_field(self, show_name: str, field: str):
+        """Set liked or rating on a show, stored as work_override with show: prefix."""
+        body = self._body()
+        key = f"show:{show_name}"
+        conn = self._write()
+        try:
+            if field == "like":
+                # Read current value and toggle.
+                current = conn.execute(
+                    "SELECT value FROM work_override WHERE work_key = ? AND field = 'liked'",
+                    (key,)).fetchone()
+                wanted = body.get("value")
+                if wanted is None:
+                    wanted = not bool(current and current[0] and current[0] != "0")
+                db.set_override(conn, key, "liked", 1 if wanted else 0)
+                return self.send_json({"ok": True, "field": "liked",
+                                       "value": bool(wanted)})
+            elif field == "rating":
+                value = body.get("value")
+                db.set_override(conn, key, "rating", value)
+                return self.send_json({"ok": True, "field": "rating",
+                                       "value": value})
+            else:
+                return self.send_json({"error": "unknown field"}, status=400)
+        finally:
+            conn.close()
+
     def send_artwork(self, size: str, item_id: int):
         full_dir, thumb_dir = artwork.paths(self.database)
         source = (thumb_dir if size == "thumb" else full_dir) / f"{item_id}.jpg"
@@ -355,6 +413,18 @@ class Handler(BaseHTTPRequestHandler):
         from . import posters
         full_dir, thumb_dir = posters.poster_dirs(self.database)
         name = f"{posters._safe(work_key)}.jpg"
+        source = (thumb_dir if size == "thumb" else full_dir) / name
+        if size == "thumb" and not source.exists():
+            source = full_dir / name
+        if not source.is_file():
+            return self.send_json({"error": "no poster"}, status=404)
+        self.send_body(source.read_bytes(), "image/jpeg",
+                       cache="private, max-age=86400")
+
+    def send_show_poster(self, size: str, show_name: str):
+        from . import posters
+        full_dir, thumb_dir = posters.show_poster_dirs(self.database)
+        name = f"{posters._safe(show_name)}.jpg"
         source = (thumb_dir if size == "thumb" else full_dir) / name
         if size == "thumb" and not source.exists():
             source = full_dir / name
@@ -405,12 +475,31 @@ def serve(database: Path, host: str = "127.0.0.1", port: int = 8765,
     handler = partial(Handler, database=database)
     httpd = ThreadingHTTPServer((host, port), handler)
     url = f"http://{host}:{httpd.server_port}/"
-    print(f"MoviesLists running at {url}\nPress Control-C to stop.")
+    print(f"MoviesLists running at {url}")
+
+    server_thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    server_thread.start()
+
     if open_browser:
-        threading.Timer(0.4, lambda: __import__("webbrowser").open(url)).start()
-    try:
-        httpd.serve_forever()
-    except KeyboardInterrupt:
-        print("\nstopped")
-    finally:
-        httpd.server_close()
+        try:
+            import webview
+            webview.create_window("MoviesLists", url, width=1280, height=860,
+                                  min_size=(800, 500))
+            webview.start()
+        except ImportError:
+            print("pywebview not installed; falling back to browser")
+            __import__("webbrowser").open(url)
+            try:
+                server_thread.join()
+            except KeyboardInterrupt:
+                pass
+    else:
+        print("Press Control-C to stop.")
+        try:
+            server_thread.join()
+        except KeyboardInterrupt:
+            pass
+
+    print("\nstopped")
+    httpd.shutdown()
+    httpd.server_close()

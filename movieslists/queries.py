@@ -141,9 +141,11 @@ def _lb_side(conn):
 
 def library(conn: sqlite3.Connection, art_ids: set[int] | None = None,
             poster_keys: set[str] | None = None,
+            show_posters: set[str] | None = None,
             include_deleted: bool = False) -> dict:
     art_ids = art_ids or set()
     poster_keys = poster_keys or set()
+    show_posters = show_posters or set()
     tv = _tv_side(conn)
     lb_films, lb_entries, lb_reviews = _lb_side(conn)
     tmdb = _tmdb_side(conn)
@@ -209,9 +211,8 @@ def library(conn: sqlite3.Connection, art_ids: set[int] | None = None,
                          or (m.get("runtime") * 60 if m.get("runtime") else None)),
             # TV.app rates nothing, so a star comes from Letterboxd unless
             # overridden here.
-            "rating": db.coerce("rating", None) if False else (
-                int(round((f or {}).get("rating") * 20))
-                if (f or {}).get("rating") is not None else 0),
+            "rating": (int(round((f or {}).get("rating") * 20))
+                      if (f or {}).get("rating") is not None else 0),
             "sources": sources,
             "tv_id": (t or {}).get("id"),
             "lb_uri": (f or {}).get("uri"),
@@ -256,7 +257,7 @@ def library(conn: sqlite3.Connection, art_ids: set[int] | None = None,
     return {
         "columns": ROW_COLUMNS,
         "rows": rows,
-        "episodes": episodes(conn, art_ids, poster_keys),
+        "episodes": episodes(conn, art_ids, poster_keys, show_posters),
         "facets": facets(conn),
         "stats": stats(conn),
         "sync": last_sync(conn),
@@ -266,7 +267,37 @@ def library(conn: sqlite3.Connection, art_ids: set[int] | None = None,
         "genres": db.GENRES,
         "deleted_count": deleted,
         "television_count": len(television),
+        "show_posters": sorted(show_posters),
+        "show_meta": _show_meta(conn),
     }
+
+
+def _show_meta(conn: sqlite3.Connection) -> dict:
+    """TMDb data and user edits for TV shows."""
+    meta = {}
+    for row in conn.execute(
+        "SELECT show_name, tmdb_id, vote_average, genres, overview "
+        "FROM tmdb_show WHERE status = 'ok'"
+    ):
+        meta[row["show_name"]] = {
+            "tmdb_id": row["tmdb_id"],
+            "rating": row["vote_average"],
+            "genres": row["genres"],
+            "overview": row["overview"],
+        }
+    # User overrides for shows (keyed as "show:Name" in work_override).
+    for row in conn.execute(
+        "SELECT work_key, field, value FROM work_override "
+        "WHERE work_key LIKE 'show:%'"
+    ):
+        name = row["work_key"][5:]  # strip "show:" prefix
+        entry = meta.setdefault(name, {})
+        field = row["field"]
+        # Namespace user overrides so JS can tell them from TMDb values.
+        if field == "rating":
+            field = "rating_override"
+        entry[field] = db.coerce(row["field"], row["value"])
+    return meta
 
 
 def _safe_key(work_key: str) -> str:
@@ -274,7 +305,8 @@ def _safe_key(work_key: str) -> str:
 
 
 def episodes(conn: sqlite3.Connection, art_ids: set[int] | None = None,
-             poster_keys: set[str] | None = None) -> list:
+             poster_keys: set[str] | None = None,
+             show_posters: set[str] | None = None) -> list:
     """TV episodes: TV.app's own, plus the television logged on Letterboxd.
 
     The latter arrive as works rather than items, so they are shaped like an

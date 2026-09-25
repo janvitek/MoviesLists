@@ -96,6 +96,40 @@ def _relink(database: Path) -> None:
         print("linked: " + ", ".join(noted))
 
 
+def _import_bundle(database: Path, shared_root: Path) -> None:
+    """Pull Letterboxd, TMDb and link decisions from the shared folder."""
+    import sqlite3
+
+    from . import db, portable
+
+    conn = db.connect(database)
+    conn.row_factory = sqlite3.Row
+    try:
+        result = portable.import_bundle(conn, shared_root)
+    finally:
+        conn.close()
+    if result:
+        tables = result["tables"]
+        parts = [f"{v} {k}" for k, v in tables.items() if v]
+        print(f"loaded shared data: {', '.join(parts) or 'empty'}")
+
+
+def _export_bundle(database: Path, shared_root: Path) -> None:
+    """Push Letterboxd, TMDb and link decisions to the shared folder."""
+    import sqlite3
+
+    from . import db, portable
+
+    conn = db.connect(database)
+    conn.row_factory = sqlite3.Row
+    try:
+        path = portable.export_bundle(conn, shared_root)
+    finally:
+        conn.close()
+    mb = path.stat().st_size / 1_000_000
+    print(f"shared data written ({mb:.1f} MB)")
+
+
 def _top_up_tmdb(database: Path, args, limit: int = 60) -> None:
     """Fetch TMDb records for films that have none yet.
 
@@ -206,6 +240,14 @@ def cmd_serve(args) -> int:
         print(f"error: no library cache at {database}\nrun 'movieslists sync' first.",
               file=sys.stderr)
         return 1
+
+    # Import Letterboxd, TMDb and link decisions from another machine.
+    store = store or _shared(args)
+    if store is not None:
+        _import_bundle(database, store.root)
+
+    # Build the work graph so the list has something to show.
+    _relink(database)
 
     if not args.no_tmdb:
         _top_up_tmdb(database, args)
@@ -345,6 +387,10 @@ def cmd_letterboxd(args) -> int:
               f"Letterboxd films")
         for key, value in works.stats(conn).items():
             print(f"{key:>10}: {value}")
+
+        store = _shared(args)
+        if store is not None:
+            _export_bundle(database, store.root)
         return 0
     finally:
         conn.close()
@@ -543,6 +589,33 @@ def cmd_tmdb(args) -> int:
                   f"then: echo YOUR_KEY > {posters.KEY_FILE}")
         return 0
 
+    if args.titles:
+        try:
+            result = posters.load_title_index(database)
+        except RuntimeError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        print(f"loaded {result['titles']} titles into the index")
+        return 0
+
+    if args.shows:
+        def show_progress(done, total, counts):
+            print(f"  {done}/{total}  found {counts['found']}, "
+                  f"posters {counts['posters']}, not found {counts['missing']}")
+
+        try:
+            result = posters.fetch_shows(database, limit=args.limit,
+                                         progress=show_progress)
+        except RuntimeError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        print(f"looked up {result['looked_up']}: described {result['found']}, "
+              f"{result['posters']} posters, {result['missing']} not found")
+        store = _shared(args)
+        if store is not None:
+            _export_bundle(database, store.root)
+        return 0
+
     if args.television:
         def tv_progress(done, total, counts):
             print(f"  {done}/{total}  television {counts['television']}, "
@@ -569,6 +642,9 @@ def cmd_tmdb(args) -> int:
             return 1
         print(f"checked {same['checked']}: {same['television']} more are "
               f"television")
+        store = _shared(args)
+        if store is not None:
+            _export_bundle(database, store.root)
         return 0
 
     def progress(done, total, counts):
@@ -588,6 +664,10 @@ def cmd_tmdb(args) -> int:
           f"({result['directors']} with a director), "
           f"{result['posters']} posters, {result['missing']} not found, "
           f"{result['errors']} errors; {result['remaining']} still to do")
+
+    store = _shared(args)
+    if store is not None:
+        _export_bundle(database, store.root)
     return 0
 
 def build_parser() -> argparse.ArgumentParser:
@@ -698,6 +778,11 @@ def build_parser() -> argparse.ArgumentParser:
                          "library an IMDb id; 'missing': only films TV.app "
                          "does not have; 'gaps': those plus films TV.app left "
                          "without a director")
+    tm.add_argument("--titles", action="store_true",
+                    help="download TMDb's daily export to build a title index "
+                         "for autocomplete (~100K popular films)")
+    tm.add_argument("--shows", action="store_true",
+                    help="fetch TMDb metadata and posters for TV shows")
     tm.add_argument("--television", action="store_true",
                     help="identify entries that are television rather than "
                          "film, by asking TMDb's series index")

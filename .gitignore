@@ -1,8 +1,15 @@
 __pycache__/
 *.pyc
 .DS_Store
+.pytest_cache/
 
 # User data and snapshots never belong in the repo.
 data/
 snapshots/
 *.sqlite3
+*.sqlite3-journal
+*.sqlite3-wal
+
+# Credentials and session files.
+tmdb.key
+lb_session.json

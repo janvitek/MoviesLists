@@ -35,6 +35,7 @@ TV_DETAIL_URL = "https://api.themoviedb.org/3/tv"
 # the threshold only has to fall in the gap.
 SERIES_MARGIN = 5
 SERIES_MIN_VOTES = 20
+EXPORT_URL = "http://files.tmdb.org/p/exports/movie_ids_{month}_{day}_{year}.json.gz"
 DETAIL_URL = "https://api.themoviedb.org/3/movie"
 IMAGE_BASE = "https://image.tmdb.org/t/p"
 FULL_SIZE, THUMB_SIZE = "w500", "w185"
@@ -590,6 +591,89 @@ def record_titles(conn: sqlite3.Connection) -> int:
     return added
 
 
+def show_poster_dirs(database: Path) -> tuple[Path, Path]:
+    root = artwork.cache_dir(database) / "show_posters"
+    return root / "full", root / "thumb"
+
+
+def fetch_shows(database: Path, key: str | None = None,
+                limit: int | None = None, progress=None) -> dict:
+    """Look up TV shows at TMDb and cache their metadata and posters."""
+    token = api_key(key)
+    if not token:
+        raise RuntimeError("no TMDb key configured")
+
+    conn = db.connect(database)
+    try:
+        shows = conn.execute(
+            "SELECT DISTINCT show FROM item WHERE show IS NOT NULL "
+            "AND show NOT IN (SELECT show_name FROM tmdb_show) "
+            "ORDER BY show COLLATE NOCASE"
+        ).fetchall()
+        names = [r[0] for r in shows]
+        if limit is not None:
+            names = names[:limit]
+
+        full_dir, thumb_dir = show_poster_dirs(database)
+        full_dir.mkdir(parents=True, exist_ok=True)
+        thumb_dir.mkdir(parents=True, exist_ok=True)
+
+        counts = {"looked_up": 0, "found": 0, "missing": 0,
+                  "errors": 0, "posters": 0}
+        for n, show_name in enumerate(names, start=1):
+            counts["looked_up"] += 1
+            try:
+                found = search_tv(show_name, token)
+            except RuntimeError as exc:
+                counts["errors"] += 1
+                conn.execute(
+                    "INSERT OR REPLACE INTO tmdb_show "
+                    "(show_name, status, fetched_at) VALUES (?, 'error', ?)",
+                    (show_name, db._now_iso()))
+                if "rejected the key" in str(exc):
+                    raise
+                continue
+
+            if not found:
+                counts["missing"] += 1
+                conn.execute(
+                    "INSERT OR REPLACE INTO tmdb_show "
+                    "(show_name, status, fetched_at) VALUES (?, 'none', ?)",
+                    (show_name, db._now_iso()))
+            else:
+                genres = series_genres(found["series_id"], token)
+                counts["found"] += 1
+                conn.execute(
+                    "INSERT OR REPLACE INTO tmdb_show "
+                    "(show_name, tmdb_id, name, year, overview, genres, "
+                    "poster_path, vote_count, status, fetched_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'ok', ?)",
+                    (show_name, found["series_id"], found["series_name"],
+                     found["series_year"], found["overview"], genres,
+                     found["poster_path"], found.get("vote_count"),
+                     db._now_iso()))
+                if found.get("poster_path"):
+                    safe = _safe(show_name)
+                    try:
+                        (full_dir / f"{safe}.jpg").write_bytes(
+                            _request(f"{IMAGE_BASE}/{FULL_SIZE}{found['poster_path']}"))
+                        (thumb_dir / f"{safe}.jpg").write_bytes(
+                            _request(f"{IMAGE_BASE}/{THUMB_SIZE}{found['poster_path']}"))
+                        counts["posters"] += 1
+                    except (urllib.error.URLError, TimeoutError, OSError):
+                        pass
+
+            if n % COMMIT_EVERY == 0:
+                conn.commit()
+                if progress:
+                    progress(n, len(names), counts)
+            time.sleep(PAUSE_SECONDS)
+        conn.commit()
+        return counts
+    finally:
+        conn.close()
+
+
 def summary(database: Path) -> dict:
     full, thumb = poster_dirs(database)
     count = lambda d: len(list(d.glob("*.jpg"))) if d.is_dir() else 0
@@ -601,6 +685,11 @@ def summary(database: Path) -> dict:
         with_director = conn.execute(
             "SELECT COUNT(*) FROM tmdb_film WHERE directors IS NOT NULL").fetchone()[0]
         pending = len(wanted(conn))
+        has_titles = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='tmdb_title'"
+        ).fetchone()
+        titles = conn.execute(
+            "SELECT COUNT(*) FROM tmdb_title").fetchone()[0] if has_titles else 0
     finally:
         conn.close()
     return {"films_described": by_status.get("ok", 0),
@@ -609,4 +698,53 @@ def summary(database: Path) -> dict:
             "errors": by_status.get("error", 0),
             "posters": count(full), "thumbnails": count(thumb),
             "bytes": size(full) + size(thumb), "pending": pending,
-            "key_configured": bool(api_key())}
+            "key_configured": bool(api_key()),
+            "title_index": titles}
+
+
+def load_title_index(database: Path, min_popularity: float = 2.0) -> dict:
+    """Download TMDb's daily export and build a title index for autocomplete.
+
+    Only non-adult films above the popularity threshold are kept -- about
+    100K titles, enough for any film someone would search for.
+    """
+    import gzip
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc)
+    url = EXPORT_URL.format(
+        month=f"{now.month:02d}", day=f"{now.day:02d}", year=now.year)
+    print(f"downloading TMDb daily export ...")
+    try:
+        data = gzip.decompress(_request(url, timeout=60))
+    except Exception:
+        # Today's export may not be posted yet; try yesterday.
+        yesterday = datetime.fromtimestamp(now.timestamp() - 86400, tz=timezone.utc)
+        url = EXPORT_URL.format(
+            month=f"{yesterday.month:02d}", day=f"{yesterday.day:02d}",
+            year=yesterday.year)
+        data = gzip.decompress(_request(url, timeout=60))
+
+    rows = []
+    for line in data.decode("utf-8").splitlines():
+        if not line.strip():
+            continue
+        entry = json.loads(line)
+        if entry.get("adult") or entry.get("video"):
+            continue
+        pop = entry.get("popularity", 0)
+        if pop < min_popularity:
+            continue
+        rows.append((entry["id"], entry.get("original_title") or "", pop))
+
+    print(f"parsed {len(rows)} titles (popularity >= {min_popularity})")
+    conn = db.connect(database)
+    try:
+        with conn:
+            conn.execute("DELETE FROM tmdb_title")
+            conn.executemany(
+                "INSERT OR REPLACE INTO tmdb_title (tmdb_id, title, popularity) "
+                "VALUES (?, ?, ?)", rows)
+    finally:
+        conn.close()
+    return {"titles": len(rows)}
